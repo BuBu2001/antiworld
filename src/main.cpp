@@ -34,7 +34,8 @@ int main() {
         core::Logger::info("AntiWorld: модель загружена из " + modelPath.string());
 
         // Создаём окно и инициализируем базовый слой Vulkan.
-        core::Window window(1280, 720, "AntiWorld");
+        // 0/0 — размер основного монитора (полное разрешение экрана).
+        core::Window window(0, 0, "AntiWorld");
         renderer::VulkanBase vulkan;
         vulkan.init(window);
         vulkan.uploadMesh(model);
@@ -128,6 +129,7 @@ int main() {
         }
 
         double lastTime = glfwGetTime();
+        float telemetryTimer_ = 0.0f;
 
         // Главный цикл рендера: обрабатываем события, рисуем кадр, повторяем.
         while (!window.shouldClose()) {
@@ -161,6 +163,36 @@ int main() {
             // Свет и морозность сезона — в UBO этого кадра.
             world.setEnvironment(terrain.environment());
             world.render();
+
+            // Диагностика кадра: раз в 2 секунды пишем в лог позицию камеры,
+            // высоту земли под ней и число draw-вызовов. Нужна, чтобы отличить
+            // «камера не двигается» от «двигается, но мир не тот» без
+            // скриншота: если позиция стоит — вопрос ко вводу, если меняется,
+            // а draw-вызовы есть — вопрос к тому, что попадает в кадр.
+            telemetryTimer_ += dt;
+            if (telemetryTimer_ >= 2.0f) {
+                telemetryTimer_ = 0.0f;
+                const glm::vec3 eye = camera.position();
+                // Фокус окна важен на Wayland/Wayland-сессиях: без него GLFW не
+                // получает клавиши, и камера «не работает» при полностью живом
+                // приложении. Курсор в окне нужен для mouseDelta: без него
+                // обзор мышью не двигает камеру.
+                const bool focused =
+                    glfwGetWindowAttrib(window.handle(), GLFW_FOCUSED) == GLFW_TRUE;
+                double cursorX = 0.0;
+                double cursorY = 0.0;
+                core::Input::mousePosition(cursorX, cursorY);
+                core::Logger::info(
+                    "Кадр: eye=(" + std::to_string(eye.x) + "," + std::to_string(eye.y) + "," +
+                        std::to_string(eye.z) + ") земляПодКамерой=" +
+                        std::to_string(terrain.heightAt(eye.x, eye.z)) + " море=" +
+                        std::to_string(terrain.heightmap().seaLevel()) +
+                        " aspect=" + std::to_string(aspect) + " drawCalls=" +
+                        std::to_string(vulkan.lastFrameDrawCalls()) + " fps=" +
+                        std::to_string(static_cast<int>(1.0f / (dt > 0.0f ? dt : 1.0f))) +
+                        " фокус=" + (focused ? "ДА" : "НЕТ") + " курсор=(" +
+                        std::to_string(cursorX) + "," + std::to_string(cursorY) + ")");
+            }
         }
 
         core::Logger::info(

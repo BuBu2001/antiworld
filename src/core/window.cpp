@@ -27,6 +27,24 @@ Window::Window(int width, int height, const std::string& title) {
     // Изменяемое окно — чтобы задействовать пересоздание swapchain при resize.
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
+    // width/height <= 0 — берём разрешение ОСНОВНОГО монитора, чтобы окно
+    // открывалось во весь экран пользователя, а не в произвольных 1280x720.
+    // Запрашиваем ПОСЛЕ glfwInit: без инициализированного GLFW монитор
+    // недоступен. Если монитор почему-то не отдал video mode, откатываемся
+    // на безопасные 1280x720, чтобы не создавать окно нулевого размера.
+    if (width <= 0 || height <= 0) {
+        int detectedWidth = 1280;
+        int detectedHeight = 720;
+        if (GLFWmonitor* monitor = glfwGetPrimaryMonitor(); monitor != nullptr) {
+            if (const GLFWvidmode* mode = glfwGetVideoMode(monitor); mode != nullptr) {
+                detectedWidth = mode->width;
+                detectedHeight = mode->height;
+            }
+        }
+        width = detectedWidth;
+        height = detectedHeight;
+    }
+
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (window_ == nullptr) {
         if (--g_glfwRefCount == 0) {
