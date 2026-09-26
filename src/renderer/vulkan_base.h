@@ -106,6 +106,7 @@ private:
     void destroyRenderTargets();
 
     void createSyncObjects();
+    void recreateSyncPrimitives();
 
     // Пересоздание swapchain при изменении размера окна.
     void cleanupSwapChain();

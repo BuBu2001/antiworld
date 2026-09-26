@@ -62,7 +62,7 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     // Атрибуты: 0..4 — вершина (binding 0), 5..8 — колонки матрицы модели
     // (binding 1, instanced). Нумерация атрибутов сквозная по обоим bindings,
     // поэтому добавление цвета к Vertex сдвинуло матрицу с 3..6 на 5..8.
-    std::array<VkVertexInputAttributeDescription, 9> attributeDescriptions{};
+    std::array<VkVertexInputAttributeDescription, 10> attributeDescriptions{};
     attributeDescriptions[0].location = 0;
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -90,12 +90,18 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     attributeDescriptions[4].format = VK_FORMAT_R32_SFLOAT;
     attributeDescriptions[4].offset = offsetof(Vertex, snowBias);
 
+    // Флаг воды (география): 1 — под уровнем моря. Так же один float.
+    attributeDescriptions[5].location = 5;
+    attributeDescriptions[5].binding = 0;
+    attributeDescriptions[5].format = VK_FORMAT_R32_SFLOAT;
+    attributeDescriptions[5].offset = offsetof(Vertex, water);
+
     for (size_t column = 0; column < 4; ++column) {
-        attributeDescriptions[column + 5].location = static_cast<uint32_t>(column + 5);
-        attributeDescriptions[column + 5].binding = 1;
-        attributeDescriptions[column + 5].format = VK_FORMAT_R32G32B32A32_SFLOAT;
-        attributeDescriptions[column + 5].offset =
-            static_cast<uint32_t>(column * sizeof(float));
+        attributeDescriptions[column + 6].location = static_cast<uint32_t>(column + 6);
+        attributeDescriptions[column + 6].binding = 1;
+        attributeDescriptions[column + 6].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        attributeDescriptions[column + 6].offset =
+            static_cast<uint32_t>(column * sizeof(glm::vec4));
     }
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};

@@ -18,6 +18,10 @@ struct Vertex {
     // (тундра, вершины). Сезон подмешивает шейдер, поэтому смена времени года
     // не требует перезагрузки вершинного буфера.
     float snowBias{0.0f};
+    // Флаг географии: 1 — узел карты высот лежит под уровнем моря (вода),
+    // 0 — суша. Заполняется при генерации mesh; шейдер по нему рисует
+    // океанскую гладь и отключает снег/биомы под водой.
+    float water{0.0f};
 };
 
 static_assert(offsetof(Vertex, position) == 0);
@@ -25,7 +29,9 @@ static_assert(offsetof(Vertex, normal) == 12);
 static_assert(offsetof(Vertex, uv) == 24);
 static_assert(offsetof(Vertex, color) == 32);
 static_assert(offsetof(Vertex, snowBias) == 44);
-// 48 байт — кратно 16, поэтому вершина выровнена как std140-вектор.
-static_assert(sizeof(Vertex) == 48);
+static_assert(offsetof(Vertex, water) == 48);
+// 52 байта: все поля — float-ы по 4 байта, естественное выравнивание Vertex
+// равно 4, поэтому stride равен sizeof и годится для вершинного буфера Vulkan.
+static_assert(sizeof(Vertex) == 52);
 
 }
