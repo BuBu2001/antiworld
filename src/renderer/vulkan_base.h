@@ -16,6 +16,7 @@
 #include <vulkan/vulkan.h>
 
 #include "renderer/command_buffers.h"
+#include "renderer/frustum_culling.h"
 #include "renderer/mesh.h"
 #include "renderer/pipeline.h"
 #include "renderer/render_pass.h"
@@ -91,6 +92,15 @@ public:
     // Освобождает все Vulkan-ресурсы в правильном порядке.
     void cleanup();
 
+    // === Кадровая статистика (для HUD: доказательство работы culling/LOD) ===
+    // Число реальных draw-вызовов, записанных в командный буфер последнего
+    // отрисованного кадра (после frustum culling на CPU — см. CullingStats).
+    std::uint32_t lastFrameDrawCalls() const noexcept { return lastDrawCalls_; }
+    // Кандидатов было (до отсечения) — из последнего drawFrame().
+    std::uint32_t lastFrameCandidates() const noexcept {
+        return static_cast<std::uint32_t>(sortScratch_.size());
+    }
+
 private:
     void createInstance();
     void createDebugMessenger();
@@ -162,6 +172,12 @@ private:
     // переставлять элементы у вызывающего за спиной не вежливо. Буфер
     // переиспользуется между кадрами, чтобы не аллоцировать в горячем пути.
     std::vector<DrawData> sortScratch_;
+    // Рабочие буферы групп (mesh, LOD) и матриц — тоже переиспользуются.
+    std::vector<MeshDraw> meshDrawScratch_;
+    std::vector<glm::mat4> modelMatrixScratch_;
+
+    // Draw-вызовы последнего записанного командного буфера (статистика HUD).
+    std::uint32_t lastDrawCalls_{0};
 
     // Синхронизация: по набору на каждый кадр в полёте.
     std::vector<VkSemaphore> imageAvailableSemaphores_;
