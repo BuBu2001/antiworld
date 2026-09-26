@@ -7,6 +7,7 @@ add_library(world STATIC
     climate.cpp
     terrain_generator.cpp
     terrain.cpp
+    spatial_hash.cpp
 )
 
 target_include_directories(world PUBLIC ${CMAKE_CURRENT_LIST_DIR}/..)
