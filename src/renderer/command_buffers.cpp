@@ -133,15 +133,15 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
         // поэтому используется классический indexed instanced draw:
         // instanceCount экземпляров за один вызов (10 000 «деревьев»
         // InstancedRenderer'а — это ровно ОДНА такая строка/один вызов).
-        // firstInstance ОБЯЗАТЕЛЕН и берётся из MeshDraw: матрицы всех групп
-        // лежат в одном буфере подряд, и каждая группа должна читать свои
-        // матрицы со своего смещения. С firstInstance=0 все группы читали бы
-        // матрицы первой группы и рисовались бы на её transforms.
-        // Для прямого (не indirect) vkCmdDrawIndexed ненулевой firstInstance
-        // не требует фичи drawIndirectFirstInstance — та относится только
-        // к структуре VkDrawIndexedIndirectCommand.
+        //
+        // firstInstance здесь 0 СОЗНАТЕЛЬНО: смещение на матрицы группы задаёт
+        // pOffsets[1] в vkCmdBindVertexBuffers выше (firstInstance * sizeof(mat4)),
+        // а binding 1 объявлен с inputRate = VK_VERTEX_INPUT_RATE_INSTANCE, так
+        // что атрибуты 6..9 читаются от этого смещения. Если продублировать
+        // смещение ещё и в firstInstance draw'а, группа N прочитает матрицы
+        // с 2N, а последняя группа уйдёт за конец буфера.
         vkCmdDrawIndexed(commandBuffer, draw.mesh->indexCount(), draw.instanceCount, 0, 0,
-                         draw.firstInstance);
+                         0);
         pipeline.countDrawCall();
     }
 
