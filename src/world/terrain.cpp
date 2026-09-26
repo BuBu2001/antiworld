@@ -60,6 +60,20 @@ Terrain::Terrain(renderer::VulkanBase& renderer, physics::PhysicsWorld& physicsW
       climate_(&climate),
       generator_(config),
       biomeParams_(biomeParams) {
+    // Конструктор не должен оставлять «сирот» (mesh в renderer, тело в физике,
+    // entity в реестре) при исключении на любом из шагов: guard вызывает
+    // destroy() при раскрутке стека. Деструктор при неудачной конструкции не
+    // выполняется, поэтому без этого ресурс утекал бы.
+    struct ScopeGuard {
+        Terrain& self;
+        ~ScopeGuard() {
+            if (!committed) {
+                self.destroy();
+            }
+        }
+        bool committed = false;
+    } guard{*this};
+
     // 1) Карта высот — единственный источник истины для mesh, коллайдера и
     //    температуры (падение с высотой).
     heightmap_ = generator_.generate();
@@ -112,6 +126,7 @@ Terrain::Terrain(renderer::VulkanBase& renderer, physics::PhysicsWorld& physicsW
     core::Logger::info("Terrain: горы от высоты " + format(biomeParams_.mountainStart) + " до " +
                        format(biomeParams_.mountainEnd) + " ед.");
     countBiomes(heightmap_, biomeParams_, *climate_);
+    guard.committed = true;  // конструкция успешна — ресурсы за нами
 }
 
 Terrain::~Terrain() {
@@ -157,6 +172,11 @@ renderer::FrameEnvironment Terrain::environment() const {
     env.sunIntensity = climate_->sunIntensity();
     env.ambient = climate_->ambient();
     env.frost = climate_->frost();
+    // География мира: уровень моря и наличие океана приходят из карты высот.
+    // Шейдер рисует водную гладь ровно на этой высоте, поэтому значение —
+    // факт мира, а не настройка рендера.
+    env.seaLevel = heightmap_.seaLevel();
+    env.hasWater = heightmap_.waterFraction() > 0.0f ? 1.0f : 0.0f;
     return env;
 }
 

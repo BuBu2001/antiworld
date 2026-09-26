@@ -46,6 +46,23 @@ public:
     float cellSize() const noexcept { return cellSize_; }
     bool empty() const noexcept { return heights_.empty(); }
 
+    // Уровень моря этой карты высот. 0, если карта без океанов (чистый fBm).
+    // Это часть ГЕОГРАФИИ мира: всё, что ниже — вода (океан/море), а не
+    // «низкий холм». Рендер и биомы обязаны сверяться с этим значением.
+    float seaLevel() const noexcept { return seaLevel_; }
+    void setSeaLevel(float level) noexcept { seaLevel_ = level; }
+
+    // Истина, если точка под водой (географически, а не визуально).
+    bool isUnderwater(std::uint32_t x, std::uint32_t z) const {
+        return heightAt(x, z) < seaLevel_;
+    }
+    bool isUnderwaterWorld(float worldX, float worldZ) const {
+        return sample(worldX, worldZ) < seaLevel_;
+    }
+    // Доля узлов карты, занятых водой (для логов и отладки генерации).
+    float waterFraction() const noexcept { return waterFraction_; }
+    void setWaterFraction(float fraction) noexcept { waterFraction_ = fraction; }
+
     // Габариты ландшафта по X и Z (в мировых единицах).
     float sizeX() const noexcept;
     float sizeZ() const noexcept;
@@ -76,7 +93,41 @@ private:
     float cellSize_{1.0f};
     float minHeight_{0.0f};
     float maxHeight_{0.0f};
+    float seaLevel_{0.0f};
+    float waterFraction_{0.0f};
     std::vector<float> heights_;
+};
+
+// Конфигурация «географии» мира: континентально-океаническая маска, по которой
+// фрактальный шум превращается в земеподобный ландшафт с океанами, морями,
+// побережьями, равнинами и горами. Без этой маски чистый fBm-шум даёт просто
+// холмы около нуля («странное», которое видел игрок), а не сушу и воду.
+//
+// Маска считается от того же координатного центра, что и вся сетка высот,
+// поэтому при одном seed меньший ландшафт остаётся куском большего.
+struct GeographyConfig {
+    // Включена ли маска вовсе. false — чистый fBm (прежнее поведение).
+    bool enabled{true};
+    // Уровень моря по высоте (в мировых единицах). Всё, что ниже — вода.
+    float seaLevel{0.0f};
+    // Глубина океана: насколько ниже уровня моря опускается oceanDepth = 1.
+    float oceanDepth{24.0f};
+    // Максимальная высота суши над уровнем моря (горы).
+    float maxLandHeight{38.0f};
+    // Частота континентальной маски (крупные «материки»). Меньше — крупнее
+    // континенты относительно размера карты.
+    float continentScale{0.0035f};
+    // Смещение маски шума континентов (свой слой шума, независимый от рельефа).
+    std::uint32_t continentSeedOffset{7919u};
+
+    // Доля площади карты, которую должна занимать вода (0..1). После генерации
+    // маска линейно растягивается так, чтобы ровно эта доля высот оказалась
+    // под уровнем моря — иначе на части сидов получался либо сплошной океан,
+    // либо сплошня суша (детерминированно, но непригодно для игры).
+    float targetOceanFraction{0.62f};
+    // Насколько резко выражены берега: exponent > 1 делает мелководье уже,
+    // глубокие места — резче (s-curve маски глубины).
+    float coastSharpness{1.6f};
 };
 
 // Генератор ландшафта: шум -> карта высот -> mesh / коллайдер.
@@ -119,11 +170,20 @@ public:
         float baseLevel{0.0f};
         // Seed шума: одинаковый seed — одинаковый ландшафт.
         std::uint32_t seed{PerlinNoise::kDefaultSeed};
+        // География мира: континенты, океаны и уровень моря. По умолчанию
+        // включена — без неё рельеф выглядит как бесконечные холмы «вокруг
+        // нуля», а не как планета с водой и сушей.
+        GeographyConfig geography{};
     };
 
     explicit TerrainGenerator();
 
     explicit TerrainGenerator(Config config);
+
+    // Уровень моря текущей конфигурации (0, если география выключена).
+    float seaLevel() const noexcept {
+        return config_.geography.enabled ? config_.geography.seaLevel : 0.0f;
+    }
 
     TerrainGenerator(const TerrainGenerator&) = default;
     TerrainGenerator& operator=(const TerrainGenerator&) = default;
@@ -175,8 +235,18 @@ private:
     Heightmap generateGrid(std::uint32_t width, std::uint32_t depth, float scale,
                            int octaves) const;
 
+    // Земеподобный рельеф: континентальная маска (крупный шум) + детальный
+    // fBm-рельеф -> высота относительно уровня моря. Возвращает сырые высоты
+    // (до нормировки доли океана).
+    void generateContinentalHeights(std::uint32_t width, std::uint32_t depth,
+                                    float scale, int octaves,
+                                    std::vector<float>& heights) const;
+
     Config config_;
     PerlinNoise noise_;
+    // Отдельный слой шума для континентальной маски: независим от рельефа,
+    // чтобы материки и холмы не были коррелированы.
+    PerlinNoise continentNoise_;
 };
 
 }  // namespace world

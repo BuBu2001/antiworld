@@ -7,10 +7,19 @@
 
 namespace core {
 
+namespace {
+// Счётчик активных окон: glfwInit/glfwTerminate должны вызываться ровно один
+// раз на всё приложение (glfwTerminate при живом втором окне убил бы GLFW для
+// всего процесса, а повторный glfwInit — ошибка).
+int g_glfwRefCount = 0;
+}  // namespace
+
 Window::Window(int width, int height, const std::string& title) {
-    // GLFW инициализируется ровно один раз и завершается в деструкторе.
-    if (glfwInit() != GLFW_TRUE) {
-        throw std::runtime_error("Window: не удалось инициализировать GLFW");
+    // Инициализируем GLFW при создании первого окна.
+    if (g_glfwRefCount == 0) {
+        if (glfwInit() != GLFW_TRUE) {
+            throw std::runtime_error("Window: не удалось инициализировать GLFW");
+        }
     }
 
     // Окно будет использовать Vulkan, поэтому клиентский API отключаем.
@@ -20,9 +29,12 @@ Window::Window(int width, int height, const std::string& title) {
 
     window_ = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
     if (window_ == nullptr) {
-        glfwTerminate();
+        if (--g_glfwRefCount == 0) {
+            glfwTerminate();
+        }
         throw std::runtime_error("Window: glfwCreateWindow вернул nullptr");
     }
+    ++g_glfwRefCount;
 
     initCallbacks();
     // Система ввода читает состояние напрямую через GLFWwindow.
@@ -34,16 +46,22 @@ Window::Window(int width, int height, const std::string& title) {
 
 Window::~Window() {
     if (window_ != nullptr) {
+        Input::bind(nullptr);  // отвязываем окно: иначе Input останется с висящим указателем
         glfwDestroyWindow(window_);
         window_ = nullptr;
     }
-    // Финальная точка инициализации glfwInit() — завершаем GLFW глобально.
-    glfwTerminate();
+    // Завершаем GLFW только когда закрыто последнее окно.
+    if (--g_glfwRefCount == 0) {
+        glfwTerminate();
+    }
 }
 
 void Window::pollEvents() {
     // Обрабатывает все ожидающие события и вызывает зарегистрированные колбэки.
     glfwPollEvents();
+    // Новый кадр ввода: дельты мыши считаются «на кадр», поэтому флаги
+    // consumption сбрасываются именно здесь (Input читается после pollEvents).
+    Input::startFrame();
 }
 
 bool Window::shouldClose() const {

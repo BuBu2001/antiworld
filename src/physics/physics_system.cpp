@@ -10,25 +10,24 @@
 namespace physics {
 namespace {
 
+// Порядок преобразований должен быть строго обратимым: раньше прямое
+// преобразование использовало композицию X*Y*Z (эквивалент ZYX по GLM-терминам),
+// а обратное читало углы как из матрицы Tait-Bryan YZX — из-за рассогласования
+// ориентация вращающихся тел дрейфовала каждый кадр (Euler->Quat->Euler).
+// Теперь оба направления используют один и тот же порядок: R = Rz * Ry * Rx
+// («сначала тангаж, затем рыскание, затем крен»), что соответствует
+// glm::eulerAngles() (XYZ-разложение) для обратного преобразования.
 glm::quat rotationToQuaternion(const glm::vec3& rotation) {
     glm::quat result = glm::angleAxis(rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
-    result *= glm::angleAxis(rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
-    result *= glm::angleAxis(rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
+    result = glm::angleAxis(rotation.y, glm::vec3(0.0f, 1.0f, 0.0f)) * result;
+    result = glm::angleAxis(rotation.z, glm::vec3(0.0f, 0.0f, 1.0f)) * result;
     return result;
 }
 
 glm::vec3 quaternionToRotation(const glm::quat& rotation) {
-    const glm::mat3 matrix = glm::mat3_cast(rotation);
-    const float sinY = std::clamp(matrix[2][0], -1.0f, 1.0f);
-    const float y = std::asin(sinY);
-    if (std::abs(sinY) < 0.999999f) {
-        return {
-            std::atan2(-matrix[2][1], matrix[2][2]),
-            y,
-            std::atan2(-matrix[1][0], matrix[0][0])
-        };
-    }
-    return {0.0f, y, std::atan2(matrix[0][1], matrix[1][1])};
+    // glm::eulerAngles выполняет XYZ-разложение, точно обратное композиции
+    // Rz*Ry*Rx выше, поэтому round-trip Euler->Quat->Euler стабилен.
+    return glm::eulerAngles(rotation);
 }
 
 bool isClose(const glm::vec3& first, const glm::vec3& second) {

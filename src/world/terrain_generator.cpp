@@ -100,7 +100,8 @@ TerrainGenerator::TerrainGenerator()
     : TerrainGenerator(Config{}) {}
 
 TerrainGenerator::TerrainGenerator(Config config)
-    : config_(config), noise_(config.seed) {}
+    : config_(config), noise_(config.seed),
+      continentNoise_(config.seed + config.geography.continentSeedOffset) {}
 
 Heightmap TerrainGenerator::generate() const {
     return generateGrid(config_.width, config_.depth, config_.scale, config_.octaves);
@@ -109,6 +110,7 @@ Heightmap TerrainGenerator::generate() const {
 void TerrainGenerator::reseed(std::uint32_t seed) {
     config_.seed = seed;
     noise_.reseed(seed);
+    continentNoise_.reseed(seed + config_.geography.continentSeedOffset);
 }
 
 Heightmap TerrainGenerator::generate(std::uint32_t width, std::uint32_t depth, float scale,
@@ -127,6 +129,16 @@ Heightmap TerrainGenerator::generateGrid(std::uint32_t width, std::uint32_t dept
     if (octaves < 1) {
         throw std::invalid_argument("TerrainGenerator: нужно хотя бы одно число октав");
     }
+    // lacunarity/gain из Config могли быть заданы некорректно: fbm2D молча
+    // возвращает 0 при неконечных параметрах, а отрицательные значения дают
+    // инвертированный/расходящийся шум. Валидируем здесь, чтобы ошибка была
+    // явной и указывала на источник — конфигурацию генератора.
+    if (!isPositiveFinite(config_.lacunarity)) {
+        throw std::invalid_argument("TerrainGenerator: lacunarity должен быть положительным и конечным");
+    }
+    if (!std::isfinite(config_.gain) || config_.gain < 0.0f) {
+        throw std::invalid_argument("TerrainGenerator: gain должен быть конечным и неотрицательным");
+    }
     if (!isPositiveFinite(config_.cellSize)) {
         throw std::invalid_argument("TerrainGenerator: шаг сетки должен быть положительным");
     }
@@ -141,18 +153,111 @@ Heightmap TerrainGenerator::generateGrid(std::uint32_t width, std::uint32_t dept
     const float offsetZ = -0.5f * static_cast<float>(depth - 1) * config_.cellSize;
 
     std::vector<float> heights(static_cast<std::size_t>(width) * depth);
+
+    if (config_.geography.enabled && config_.geography.oceanDepth > 0.0f) {
+        // Земеподобный рельеф: континенты/океаны + суша над уровнем моря.
+        generateContinentalHeights(width, depth, scale, octaves, heights);
+    } else {
+        for (std::uint32_t z = 0; z < depth; ++z) {
+            for (std::uint32_t x = 0; x < width; ++x) {
+                const float worldX = static_cast<float>(x) * config_.cellSize + offsetX;
+                const float worldZ = static_cast<float>(z) * config_.cellSize + offsetZ;
+                const float noise = noise_.fbm2D(worldX * scale, worldZ * scale, octaves,
+                                                 config_.lacunarity, config_.gain);
+                heights[static_cast<std::size_t>(z) * width + x] = config_.baseLevel +
+                                                                 config_.amplitude * noise;
+            }
+        }
+    }
+
+    // География не должна ломать физику: Jolt HeightFieldShape квантует высоты
+    // в 8 бит по диапазону [minHeight, maxHeight], поэтому extreme глубины
+    // допустимы, но бесконечности — нет (валидация в конструкторе Heightmap).
+    Heightmap result(width, depth, config_.cellSize, std::move(heights));
+    if (config_.geography.enabled) {
+        // Уровень моря и фактическая доля воды — часть географии мира. Их
+        // хранит сама карта высот, чтобы рендер (водная гладь), биомы («под
+        // водой — не лес») и физика (агенты не спавнятся в океане) сверялись
+        // с одним и тем же значением, а не с догадками.
+        result.setSeaLevel(config_.geography.seaLevel);
+        std::size_t underwater = 0;
+        for (float height : result.heights()) {
+            if (height < result.seaLevel()) {
+                ++underwater;
+            }
+        }
+        result.setWaterFraction(static_cast<float>(underwater) /
+                                static_cast<float>(result.heights().size()));
+    }
+    return result;
+}
+
+void TerrainGenerator::generateContinentalHeights(std::uint32_t width, std::uint32_t depth,
+                                                  float scale, int octaves,
+                                                  std::vector<float>& heights) const {
+    const GeographyConfig& geo = config_.geography;
+    const std::size_t count = static_cast<std::size_t>(width) * depth;
+
+    // Смещение сетки к центру — та же формула, что и в обычном рельефе, чтобы
+    // координаты шума не зависели от размера сетки.
+    const float offsetX = -0.5f * static_cast<float>(width - 1) * config_.cellSize;
+    const float offsetZ = -0.5f * static_cast<float>(depth - 1) * config_.cellSize;
+
+    // Шаг 1: сырая континентальная маска [-1, 1] (крупный шум — «материки»)
+    // и детальный fBm-рельеф той же сетки.
+    std::vector<float> mask(count);
+    std::vector<float> detail(count);
     for (std::uint32_t z = 0; z < depth; ++z) {
         for (std::uint32_t x = 0; x < width; ++x) {
             const float worldX = static_cast<float>(x) * config_.cellSize + offsetX;
             const float worldZ = static_cast<float>(z) * config_.cellSize + offsetZ;
-            const float noise = noise_.fbm2D(worldX * scale, worldZ * scale, octaves,
-                                             config_.lacunarity, config_.gain);
-            heights[static_cast<std::size_t>(z) * width + x] = config_.baseLevel +
-                                                             config_.amplitude * noise;
+            const std::size_t index = static_cast<std::size_t>(z) * width + x;
+            mask[index] = continentNoise_.fbm2D(worldX * geo.continentScale,
+                                                worldZ * geo.continentScale, 4, 2.0f, 0.5f);
+            detail[index] = noise_.fbm2D(worldX * scale, worldZ * scale, octaves,
+                                         config_.lacunarity, config_.gain);
         }
     }
 
-    return Heightmap(width, depth, config_.cellSize, std::move(heights));
+    // Шаг 2: подбор уровня моря так, чтобы доля воды была равна
+    // targetOceanFraction. Сортировка копии маски даёт перцентиль: вода там,
+    // где mask <= seaThreshold. Детерминированно при том же seed.
+    const float fraction = std::clamp(geo.targetOceanFraction, 0.05f, 0.95f);
+    std::vector<float> sortedMask = mask;
+    std::sort(sortedMask.begin(), sortedMask.end());
+    const auto percentileIndex =
+        static_cast<std::size_t>(fraction * static_cast<float>(sortedMask.size()));
+    const float seaThreshold = sortedMask[std::min(percentileIndex, sortedMask.size() - 1)];
+
+    // Шаг 3: высота каждой точки. Нормируем маску к [0..1] относительно
+    // порога: ниже порога — глубина (ocean), выше — суша (land). S-curve
+    // coastSharpness делает берег различимым: узкая полоса мелководья и
+    // сразу глубокий океан / пологая суша.
+    const float oceanRange = std::max(1e-3f, seaThreshold - sortedMask.front());
+    const float landRange = std::max(1e-3f, sortedMask.back() - seaThreshold);
+    const float sharpness = std::max(0.25f, geo.coastSharpness);
+
+    // Шаг 4: итоговые высоты. Уровень моря — это geo.seaLevel; вода там, где
+    // mask <= seaThreshold. Детальная составляющая добавляется к обеим зонам,
+    // но на берегу (depthT/landT ~ 0) её вклад мал, поэтому граница вода/суша
+    // в карте высот остаётся согласованной с маской.
+    for (std::size_t i = 0; i < count; ++i) {
+        const float m = mask[i];
+        float height;
+        if (m <= seaThreshold) {
+            const float depthT = std::pow((seaThreshold - m) / oceanRange, sharpness);
+            height = geo.seaLevel - geo.oceanDepth * depthT;
+            // Мелкие неровности дна океана (в 3 раза слабее, чем на суше).
+            height += 0.3f * config_.amplitude * detail[i] * (1.0f - depthT);
+        } else {
+            const float landT = std::pow((m - seaThreshold) / landRange, 1.0f / sharpness);
+            // Суша: плавный подъём от 0 до maxLandHeight с детальным рельефом;
+            // горы получаются там, где landT близок к 1 и detail положителен.
+            height = geo.seaLevel + landT * geo.maxLandHeight * (0.55f + 0.45f * detail[i]) +
+                     0.25f * config_.amplitude * detail[i];
+        }
+        heights[i] = height;
+    }
 }
 
 renderer::ModelData TerrainGenerator::createMesh(const Heightmap& heightmap) const {
@@ -218,6 +323,11 @@ renderer::ModelData TerrainGenerator::createMesh(const Heightmap& heightmap,
             // UV нормированы по всей поверхности (0..1 по X и Z).
             vertex.uv[0] = static_cast<float>(x) / static_cast<float>(width - 1);
             vertex.uv[1] = static_cast<float>(z) / static_cast<float>(depth - 1);
+
+            // Флаг воды — часть географии: узел под уровнем моря это океан,
+            // а не «низкий холм». Заполняется ДО painter, чтобы биомы могли
+            // по нему судить о береговой линии; шейдер рисует по нему гладь.
+            vertex.water = heights[index] < heightmap.seaLevel() ? 1.0f : 0.0f;
 
             // Раскраска снаружи (биомы/климат): вызывается последним, чтобы
             // painter видел готовую геометрию и мог на неё опираться.

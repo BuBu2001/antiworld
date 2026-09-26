@@ -5,6 +5,7 @@
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Jolt/Core/Factory.h>
@@ -18,6 +19,8 @@
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
+
+#include "core/logger.h"
 
 namespace {
 
@@ -437,7 +440,18 @@ void PhysicsWorld::step(float deltaTime) {
         &impl_->jobSystem
     );
     if (error != JPH::EPhysicsUpdateError::None) {
-        throw std::runtime_error("PhysicsWorld: Jolt update reported insufficient simulation capacity");
+        // Нехватка контактных слотов — не фатальная ошибка: один «плотный» кадр
+        // не должен убивать игру. Предупреждаем не чаще раза в секунду, чтобы
+        // не заливать лог; симуляция в этом кадре просто теряет часть контактов.
+        static float lastWarningTime = -10.0f;
+        static float accumulatedTime = 0.0f;
+        accumulatedTime += simulationDelta;
+        if (accumulatedTime - lastWarningTime >= 1.0f) {
+            lastWarningTime = accumulatedTime;
+            core::Logger::warn(
+                "PhysicsWorld: Jolt сообщил о нехватке ёмкости симуляции "
+                "(контакты/пары тел). Увеличьте maxContactConstraints/maxBodyPairs.");
+        }
     }
 }
 

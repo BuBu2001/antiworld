@@ -40,7 +40,6 @@ int main() {
         vulkan.uploadMesh(model);
 
         core::Camera camera;
-        camera.init(glm::vec3(0.0f, 70.0f, 150.0f), glm::vec3(0.0f, 0.0f, -40.0f));
         // Ландшафт простирается на 255 ед. по каждой оси, поэтому дальняя
         // плоскость отсечения по умолчанию (100 ед.) срезала бы его край.
         camera.setClipPlanes(0.5f, 600.0f);
@@ -61,6 +60,34 @@ int main() {
         // коллайдер в физике. Объявлен после renderer, физики, ECS и климата,
         // чтобы деструктор terrain отработал раньше их уничтожения.
         world::Terrain terrain(vulkan, physicsWorld, world.registry(), climate);
+
+        // Стартовая позиция камеры — над сушей, а не произвольно: с океаном
+        // ~62% площади точка (0,150) часто оказывалась посреди воды, и игрок
+        // видел «странное» — пустоту вместо мира. Ищем по концентрическим
+        // кольцам первую точку суши достаточно высоко над уровнем моря и
+        // ставим камеру над ней; viewProjection считается каждый кадр из
+        // позиции камеры, так что порядок объявления camera/terrain здесь
+        // не важен — ищем уже после создания ландшафта.
+        {
+            glm::vec3 spawn{0.0f, 70.0f, 150.0f};
+            const float sea = terrain.heightmap().seaLevel();
+            for (float radius = 0.0f; radius < 110.0f; radius += 7.0f) {
+                bool found = false;
+                for (int a = 0; a < 16 && !found; ++a) {
+                    const float angle = 6.2831853f * static_cast<float>(a) / 16.0f;
+                    const float wx = radius * std::cos(angle);
+                    const float wz = radius * std::sin(angle);
+                    const float h = terrain.heightAt(wx, wz);
+                    if (h > sea + 4.0f) {
+                        spawn = {wx, h + 40.0f, wz + 60.0f};
+                        found = true;
+                    }
+                }
+                if (found) break;
+            }
+            camera.init(spawn, glm::vec3(spawn.x, sea, spawn.z - 40.0f));
+        }
+
 
         constexpr std::size_t kAgentCount = 100;
         constexpr std::size_t kGridWidth = 10;

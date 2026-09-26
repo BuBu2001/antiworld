@@ -245,6 +245,12 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     // объединяются в группу, на каждую группу — один instanced-вызов. Матрицы
     // групп пишем в instance-буфер в том же порядке, перваяInstance указывает
     // на начало матриц группы.
+    // Сортировка по mesh гарантирует, что все инстансы одного mesh идут подряд,
+    // независимо от порядка обхода ECS (иначе один mesh дробился бы на множество
+    // отдельных vkCmdDrawIndexed).
+    std::sort(drawData.begin(), drawData.end(),
+              [](const DrawData& a, const DrawData& b) { return a.mesh < b.mesh; });
+
     std::vector<MeshDraw> meshDraws;
     std::vector<glm::mat4> modelMatrices;
     meshDraws.reserve(drawData.size());
@@ -286,6 +292,14 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
         imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex);
 
     if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+        // ВНИМАНИЕ: семафор imageAvailable_[currentFrame_] был передан в acquire
+        // и мог быть сигнален даже при ошибке. Пересоздаём синхронизационные
+        // примитивы, чтобы на следующем кадре не переиспользовать «висячий»
+        // сигнальный семафор (иначе vkQueueSubmit будет ждать никогда не
+        // сбрасываемый сигнал либо использовать уже знавший семафор).
+        // Перед удалением убеждаемся, что GPU завершил все операции.
+        vkDeviceWaitIdle(device_);
+        recreateSyncPrimitives();
         recreateSwapChain();
         return;
     }
@@ -302,8 +316,13 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     // чтобы длину не пришлось учитывать в каждом шейдере отдельно.
     frameData.sunDirection =
         glm::vec4{glm::normalize(environment.sunDirection), environment.sunIntensity};
+    // x — frost, y — ambient, z — seaLevel (уровень моря из географии мира),
+    // w — время суток (пока фиксированный полдень).
     frameData.environment =
-        glm::vec4{environment.frost, environment.ambient, 1.0f, 0.0f};
+        glm::vec4{environment.frost, environment.ambient, environment.seaLevel, 0.5f};
+    // x — есть ли в мире океан: без флага шейдер не рисует воду даже если
+    // какая-то вершина случайно оказалась ниже уровня моря (география выкл.).
+    frameData.waterFlags = glm::vec4{environment.hasWater, 0.0f, 0.0f, 0.0f};
     uniformBuffer_.update(currentFrame_, frameData);
     commandBuffers_.record(commandBuffer, renderPass_, imageIndex, swapChainExtent_,
                            pipeline_, meshDraws, kClearColor,
@@ -635,6 +654,26 @@ void VulkanBase::createSyncObjects() {
     core::Logger::info("Vulkan: созданы объекты синхронизации");
 }
 
+// Пересоздание примитивов синхронизации. Вызывается после vkDeviceWaitIdle,
+// когда предыдущие семафоры/fence гарантированно не используются GPU.
+void VulkanBase::recreateSyncPrimitives() {
+    for (size_t i = 0; i < inFlightFences_.size(); ++i) {
+        if (inFlightFences_[i] != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, inFlightFences_[i], nullptr);
+        }
+        if (renderFinishedSemaphores_[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, renderFinishedSemaphores_[i], nullptr);
+        }
+        if (imageAvailableSemaphores_[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, imageAvailableSemaphores_[i], nullptr);
+        }
+    }
+    inFlightFences_.clear();
+    renderFinishedSemaphores_.clear();
+    imageAvailableSemaphores_.clear();
+    createSyncObjects();
+}
+
 QueueFamilyIndices VulkanBase::findQueueFamilies(VkPhysicalDevice device) const {
     QueueFamilyIndices indices;
 
@@ -770,6 +809,11 @@ void VulkanBase::recreateSwapChain() {
     int height = 0;
     glfwGetFramebufferSize(window_->handle(), &width, &height);
     while (width == 0 || height == 0) {
+        // Окно может быть закрыто пользователем, пока оно свёрнуто: без
+        // проверки shouldClose() здесь игра намертво зависала в glfwWaitEvents.
+        if (window_->shouldClose()) {
+            return;
+        }
         glfwWaitEvents();
         glfwGetFramebufferSize(window_->handle(), &width, &height);
     }
