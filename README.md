@@ -23,9 +23,44 @@ include/                # публичные/сторонние заголовк
 статические библиотеки со своими `CMakeLists.txt` и подключаются к
 исполняемому файлу `antiworld`.
 
-## Зависимости (Arch Linux)
+## Быстрая установка
 
-Системные пакеты:
+```bash
+./install.sh
+```
+
+Скрипт поставит всё нужное и соберёт проект. Он идемпотентен — повторный запуск
+ничего не переустанавливает, а за секунду просто пересобирает проект.
+
+Что он делает:
+
+1. системные пакеты через `pacman`: `base-devel cmake git vulkan-headers glfw glm`;
+2. `EnTT` v3.15.0 и `Jolt` v5.6.0 собирает из исходников в `~/.local`
+   (версии зафиксированы в скрипте, чтобы сборка была воспроизводимой);
+3. конфигурирует проект с `-DCMAKE_PREFIX_PATH=~/.local`;
+4. собирает его и проверяет, что бинарник на месте.
+
+Зависимости кладутся именно в `~/.local`, а не в `/tmp`: `/tmp` очищается, и
+после перезагрузки проект перестал бы собираться.
+
+Ключи: `--prefix DIR`, `--build-dir DIR`, `--jobs N`, `--debug`, `--no-deps`,
+`--no-build`, `--force`, `--help`. Полный список — в `./install.sh --help`.
+
+```bash
+./install.sh --no-deps      # только пересобрать проект, зависимости уже стоят
+./install.sh --debug        # отладочная сборка
+./install.sh --prefix /opt/local   # зависимости в общий префикс
+```
+
+Если сборка упала, логи остаются во временном каталоге, путь к нему скрипт
+печатает в stderr.
+
+## Установка вручную
+
+<details>
+<summary>Если скрипт не подходит (ручная установка)</summary>
+
+Системные пакеты (Arch Linux):
 
 ```bash
 sudo pacman -S --needed base-devel cmake vulkan-headers glfw glm
@@ -34,15 +69,15 @@ sudo pacman -S --needed base-devel cmake vulkan-headers glfw glm
 `glm` и `glfw` поставляют CMake-конфиги (`glm::glm`, target `glfw`),
 `vulkan-headers` — `find_package(Vulkan)`.
 
-### EnTT (header-only, из AUR)
+### EnTT (header-only)
+
+Через AUR:
 
 ```bash
-yay -S entt        # или paru -S entt
+yay -S entt
 ```
 
-Пакет ставит заголовки и CMake-конфиг, поэтому `find_package(EnTT)`
-работает. Альтернатива — собрать из исходников (требуется `-DENTT_INSTALL=ON`,
-иначе CMake-конфиг не установится):
+или из исходников (нужен `-DENTT_INSTALL=ON`, иначе CMake-конфиг не установится):
 
 ```bash
 git clone https://github.com/skypjack/entt.git
@@ -75,16 +110,9 @@ sudo cmake --install Jolt/build
 - Если ставите в нестандартный префикс (`~/local`, `/tmp/...`), укажите его:
   `-DCMAKE_PREFIX_PATH="$HOME/local"` при конфигурации проекта.
 
-## Сборка
+</details>
 
-```bash
-mkdir build
-cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j"$(nproc)"
-```
-
-или без входа в каталог:
+## Сборка вручную
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -98,7 +126,8 @@ cmake --build build -j"$(nproc)"
 ```
 
 При старте печатает в лог параметры ландшафта: диапазон высот, сезон, среднюю
-температуру, высотные пороги гор и долю каждого биома.
+температуру, высотные пороги гор и долю каждого биома. Пути к `assets/` и
+шейдерам зашиты на этапе сборки, поэтому запускать можно из любого каталога.
 
 ## Мир: биомы и климат
 
