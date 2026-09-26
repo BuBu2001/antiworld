@@ -13,6 +13,10 @@ namespace renderer {
 
 class Mesh;
 
+// Уровень детализации объекта кадра (см. renderer::LodMesh / lod_manager.h).
+// 0 — полный mesh; для объектов без LOD-наборов всегда 0.
+inline constexpr int kMaxLodLevels = 3;
+
 struct DrawData {
     DrawData() = default;
     DrawData(const Mesh* meshHandle, glm::mat4 modelMatrix)
@@ -20,16 +24,23 @@ struct DrawData {
 
     const Mesh* mesh{nullptr};
     glm::mat4 model{1.0f};
+    // Выбранный на CPU уровень LOD (см. world::ChunkManager::updateCulling).
+    std::uint8_t lod{0};
 };
 
 // Группа объектов кадра, которые рисуются одной mesh одним instanced-вызовом:
 // матрицы лежат в instance-буфере подряд, начиная с firstInstance.
 // Формируется в VulkanBase::drawFrame() из DrawData, consumed в
 // CommandBuffers::record().
+//
+// Группировка идёт по паре (mesh, lod): один и тот же чанк на разных LOD —
+// разные индексные буферы, поэтому вызовы разные; но тысячи инстансов ОДНОГО
+// mesh+LOD (растительность) по-прежнему сливаются в один draw call.
 struct MeshDraw {
     const Mesh* mesh{nullptr};
     uint32_t firstInstance{0};
     uint32_t instanceCount{0};
+    std::uint8_t lod{0};
 };
 
 struct Material {

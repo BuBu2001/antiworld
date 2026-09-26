@@ -241,52 +241,65 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
         throw std::runtime_error("Vulkan: слишком много объектов в кадре");
     }
 
-    // Раскладываем объекты кадра по mesh: подряд идущие объекты с одной mesh
-    // объединяются в группу, на каждую группу — один instanced-вызов. Матрицы
-    // групп пишем в instance-буфер в том же порядке, перваяInstance указывает
-    // на начало матриц группы.
-    // Сортировка по mesh гарантирует, что все инстансы одного mesh идут подряд,
-    // независимо от порядка обхода ECS (иначе один mesh дробился бы на множество
-    // отдельных vkCmdDrawIndexed).
+    // Раскладываем объекты кадра по парам (mesh, LOD): подряд идущие объекты
+    // с одной mesh и одним уровнем детализации объединяются в группу, на
+    // каждую группу — один instanced-вызов. Матрицы групп пишем в
+    // instance-буфер в том же порядке, firstInstance указывает на начало
+    // матриц группы.
+    // Сортировка по (mesh, lod) гарантирует, что все инстансы одной пары идут
+    // подряд, независимо от порядка обхода ECS (иначе один mesh дробился бы на
+    // множество отдельных vkCmdDrawIndexed).
+    //
+    // ВАЖНО про culling: отсечение по пирамиде видимости выполняется НА CPU до
+    // вызова drawFrame() (см. world::ChunkManager::updateCulling) — в span
+    // drawData попадают только чанки, реально пересекающие frustum. Поэтому
+    // число групп здесь = числу реальных draw call'ов кадра.
     //
     // Сортируем копию: drawFrame() получает span<const DrawData>, а std::sort
     // требует изменяемых итераторов. Сортировать сам span нельзя, а менять
     // порядок у вызывающего мы не вправе — const-обязательство параметра.
     sortScratch_.assign(drawData.begin(), drawData.end());
     std::sort(sortScratch_.begin(), sortScratch_.end(),
-              [](const DrawData& a, const DrawData& b) { return a.mesh < b.mesh; });
+              [](const DrawData& a, const DrawData& b) {
+                  if (a.mesh != b.mesh) return a.mesh < b.mesh;
+                  return a.lod < b.lod;
+              });
 
-    std::vector<MeshDraw> meshDraws;
-    std::vector<glm::mat4> modelMatrices;
-    meshDraws.reserve(sortScratch_.size());
-    modelMatrices.reserve(sortScratch_.size());
+    meshDrawScratch_.clear();
+    modelMatrixScratch_.clear();
+    meshDrawScratch_.reserve(sortScratch_.size());
+    modelMatrixScratch_.reserve(sortScratch_.size());
     for (const DrawData& data : sortScratch_) {
         if (!ownsMesh(data.mesh)) {
             throw std::runtime_error("Vulkan: mesh handle не принадлежит renderer");
         }
 
-        if (!meshDraws.empty() && meshDraws.back().mesh == data.mesh) {
-            ++meshDraws.back().instanceCount;
+        if (!meshDrawScratch_.empty() && meshDrawScratch_.back().mesh == data.mesh &&
+            meshDrawScratch_.back().lod == data.lod) {
+            ++meshDrawScratch_.back().instanceCount;
         } else {
-            meshDraws.push_back({data.mesh, static_cast<uint32_t>(modelMatrices.size()), 1});
+            meshDrawScratch_.push_back({data.mesh,
+                                        static_cast<uint32_t>(modelMatrixScratch_.size()), 1,
+                                        data.lod});
         }
-        modelMatrices.push_back(data.model);
+        modelMatrixScratch_.push_back(data.model);
     }
+    const std::span<const MeshDraw> meshDraws{meshDrawScratch_};
 
     vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
                     std::numeric_limits<uint64_t>::max());
 
     VkBuffer instanceBuffer = VK_NULL_HANDLE;
-    uint32_t instanceCount = static_cast<uint32_t>(modelMatrices.size());
+    uint32_t instanceCount = static_cast<uint32_t>(modelMatrixScratch_.size());
     if (instanceCount != 0) {
         const VkDeviceSize instanceDataSize =
-            static_cast<VkDeviceSize>(modelMatrices.size() * sizeof(glm::mat4));
+            static_cast<VkDeviceSize>(modelMatrixScratch_.size() * sizeof(glm::mat4));
         Buffer& buffer = instanceBuffers_[currentFrame_];
         if (buffer.capacity() < instanceDataSize) {
-            buffer.init(device_, physicalDevice_, modelMatrices.data(), instanceDataSize,
+            buffer.init(device_, physicalDevice_, modelMatrixScratch_.data(), instanceDataSize,
                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         } else {
-            buffer.update(modelMatrices.data(), instanceDataSize);
+            buffer.update(modelMatrixScratch_.data(), instanceDataSize);
         }
         instanceBuffer = buffer.handle();
     }
@@ -332,6 +345,9 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     commandBuffers_.record(commandBuffer, renderPass_, imageIndex, swapChainExtent_,
                            pipeline_, meshDraws, kClearColor,
                            uniformBuffer_.descriptorSet(currentFrame_), instanceBuffer);
+    // Статистика для HUD: фактическое число draw-вызовов кадра (уже после
+    // frustum culling на стороне вызывающего — см. CullingStats).
+    lastDrawCalls_ = pipeline_.lastDrawCalls();
 
     const std::array<VkSemaphore, 1> waitSemaphores = {
         imageAvailableSemaphores_[currentFrame_]};

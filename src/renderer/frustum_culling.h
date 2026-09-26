@@ -102,14 +102,21 @@ private:
     awdm::dvec3 cameraPosition_{0.0};
 };
 
+#include "renderer/lod_manager.h"  // kLodLevels
+
 // Статистика отсечения за кадр (для HUD: доказательство, что culling реально
 // снижает число draw call'ов).
 struct CullingStats {
     std::uint32_t candidates{0};     // чанков-кандидатов (Loaded)
     std::uint32_t culled{0};         // отсечено frustum
     std::uint32_t submitted{0};      // попало в командный буфер
-    std::uint32_t lodCount[kLodLevelsLocal()]{};  // разбивка по выбранным LOD
-    static constexpr std::uint32_t kLodLevelsLocal() { return 3; }
+    std::uint32_t lodCount[kLodLevels]{};  // разбивка по выбранным LOD
+
+    // Суммарно индексов в отрисовке текущего кадра (по выбранным LOD) —
+    // показывает реальную экономию вершинного/индексного объёма от LOD.
+    std::uint64_t submittedIndices{0};
+    // Сколько индексов ушло бы без LOD (все чанки полным LOD0).
+    std::uint64_t unculledIndicesNoLod{0};
 };
 
 // Выбор уровня детализации по расстоянию до AABB (пороги в метрах).

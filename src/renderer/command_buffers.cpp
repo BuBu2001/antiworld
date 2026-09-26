@@ -63,6 +63,9 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
     VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+    // Статистика кадра: сколько реальных draw-вызовов попало в командный буфер
+    // ПОСЛЕ отсечения (см. GraphicsPipeline::lastDrawCalls / HUD).
+    pipeline.resetDrawCallCounter();
 
     // Begin render pass: экран очищается цветом и глубиной, затем рисуется mesh.
     VkRenderPassBeginInfo renderPassInfo{};
@@ -103,8 +106,11 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
                                 pipeline.layout(), 0, 1, &descriptorSet, 0, nullptr);
     }
 
-    // По одному instanced-вызову на mesh: вершины и индексы — из своей mesh,
-    // матрицы объектов — из общего instance-буфера со смещением на начало группы.
+    // По одному instanced-вызову на группу (mesh, LOD): вершины и индексы —
+    // из своей mesh (для чанков это отдельный индексный буфер уровня LOD),
+    // матрицы объектов — из общего instance-буфера со смещением на начало
+    // группы. Именно здесь отсечённые CPU-отсечением чанки НЕ порождают
+    // вызовов: их просто нет в meshDraws.
     for (const MeshDraw& draw : meshDraws) {
         if (draw.mesh == nullptr || !draw.mesh->initialized() || draw.instanceCount == 0 ||
             instanceBuffer == VK_NULL_HANDLE) {
@@ -123,7 +129,13 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
         vkCmdBindIndexBuffer(commandBuffer, draw.mesh->indexBuffer(), 0,
                              draw.mesh->indexType());
 
-        vkCmdDrawIndexed(commandBuffer, draw.mesh->indexCount(), draw.instanceCount, 0, 0, 0);
+        // Инстанс-буфер уже содержит по матрице на каждый экземпляр группы,
+        // поэтому используется классический indexed instanced draw:
+        // instanceCount экземпляров за один вызов (10 000 «деревьев»
+        // InstancedRenderer'а — это ровно ОДНА такая строка/один вызов).
+        vkCmdDrawIndexed(commandBuffer, draw.mesh->indexCount(), draw.instanceCount, 0, 0,
+                         0);
+        pipeline.countDrawCall();
     }
 
     vkCmdEndRenderPass(commandBuffer);
