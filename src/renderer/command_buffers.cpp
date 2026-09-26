@@ -55,7 +55,7 @@ void CommandBuffers::init(VkDevice device, uint32_t graphicsQueueFamily,
 
 void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& renderPass,
                             size_t framebufferIndex, VkExtent2D extent,
-                            const GraphicsPipeline& pipeline,
+                            GraphicsPipeline& pipeline,
                             std::span<const MeshDraw> meshDraws, VkClearColorValue clearColor,
                             VkDescriptorSet descriptorSet, VkBuffer instanceBuffer) {
     VkCommandBufferBeginInfo beginInfo{};
@@ -133,8 +133,15 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
         // поэтому используется классический indexed instanced draw:
         // instanceCount экземпляров за один вызов (10 000 «деревьев»
         // InstancedRenderer'а — это ровно ОДНА такая строка/один вызов).
+        // firstInstance ОБЯЗАТЕЛЕН и берётся из MeshDraw: матрицы всех групп
+        // лежат в одном буфере подряд, и каждая группа должна читать свои
+        // матрицы со своего смещения. С firstInstance=0 все группы читали бы
+        // матрицы первой группы и рисовались бы на её transforms.
+        // Для прямого (не indirect) vkCmdDrawIndexed ненулевой firstInstance
+        // не требует фичи drawIndirectFirstInstance — та относится только
+        // к структуре VkDrawIndexedIndirectCommand.
         vkCmdDrawIndexed(commandBuffer, draw.mesh->indexCount(), draw.instanceCount, 0, 0,
-                         0);
+                         draw.firstInstance);
         pipeline.countDrawCall();
     }
 

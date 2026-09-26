@@ -32,9 +32,12 @@ public:
     // Записывает команды кадра в commandBuffer: очистку экрана и по одному
     // indexed draw на каждую группу meshDraws. Все группы читают матрицы
     // объектов из общего instance-буфера, каждая — со своим смещением.
+    // pipeline намеренно НЕ const: record() ведёт в нём счётчик draw-вызовов
+    // (GraphicsPipeline::resetDrawCallCounter / countDrawCall), который
+    // вызывающий читает после возврата.
     void record(VkCommandBuffer commandBuffer, const RenderPass& renderPass,
                 size_t framebufferIndex, VkExtent2D extent,
-                const GraphicsPipeline& pipeline, std::span<const MeshDraw> meshDraws,
+                GraphicsPipeline& pipeline, std::span<const MeshDraw> meshDraws,
                 VkClearColorValue clearColor, VkDescriptorSet descriptorSet,
                 VkBuffer instanceBuffer);
 

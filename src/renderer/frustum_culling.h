@@ -32,6 +32,10 @@
 #include <glm/glm.hpp>
 
 #include "core/double_math.h"
+// kLodLevels нужен для CullingStats. include обязан стоять ДО namespace
+// renderer: сам lod_manager.h открывает namespace renderer, и включение его
+// внутрь нашего namespace давало renderer::renderer::kLodLevels.
+#include "renderer/lod_manager.h"
 
 namespace renderer {
 
@@ -101,8 +105,6 @@ private:
     std::array<Plane, 6> planes_{};
     awdm::dvec3 cameraPosition_{0.0};
 };
-
-#include "renderer/lod_manager.h"  // kLodLevels
 
 // Статистика отсечения за кадр (для HUD: доказательство, что culling реально
 // снижает число draw call'ов).

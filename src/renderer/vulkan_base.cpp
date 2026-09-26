@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <set>
 #include <string>
@@ -171,7 +172,7 @@ void VulkanBase::uploadMesh(const ModelData& model, const Material& material) {
                        std::to_string(model.indices.size()) + " индексов)");
 }
 
-renderer::Mesh* VulkanBase::createMesh(const ModelData& model, const Material& material) {
+Mesh* VulkanBase::createMesh(const ModelData& model, const Material& material) {
     if (device_ == VK_NULL_HANDLE) {
         throw std::runtime_error("Vulkan: нельзя создать mesh до инициализации renderer");
     }
@@ -261,7 +262,14 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     sortScratch_.assign(drawData.begin(), drawData.end());
     std::sort(sortScratch_.begin(), sortScratch_.end(),
               [](const DrawData& a, const DrawData& b) {
-                  if (a.mesh != b.mesh) return a.mesh < b.mesh;
+                  // std::less, а не сырой < : указатели на НЕСВЯЗАННЫЕ объекты
+                  // (разные Mesh, выделенные в разных местах) сравнивать через
+                  // operator< нельзя — результат не определён стандартом.
+                  // std::sort требует строгого слабого порядка, а потому
+                  // компаратор обязан быть транзитивным на всей области.
+                  // std::less гарантирует тотальный порядок для любых
+                  // указателей (сначала std::less<> по типу, потом адрес).
+                  if (a.mesh != b.mesh) return std::less<const Mesh*>{}(a.mesh, b.mesh);
                   return a.lod < b.lod;
               });
 
