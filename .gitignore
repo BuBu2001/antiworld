@@ -1,0 +1,38 @@
+# Каталоги сборки CMake
+build/
+build-*/
+cmake-build-*/
+out/
+
+# Скомпилированные объекты и библиотеки
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# Логи и временные файлы
+*.log
+*.tmp
+*.bak
+*~
+
+# Локальное Python-окружение (не часть проекта)
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+
+# Профили компиляции и прочие локальные настройки
+CMakeUserPresets.json
+.cache/
+compile_commands.json
+.vscode/
+.idea/
+
+# Системный мусор
+.DS_Store
+Thumbs.db
