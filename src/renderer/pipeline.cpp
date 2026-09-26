@@ -59,9 +59,10 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     bindingDescriptions[1].stride = sizeof(glm::mat4);
     bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-    // Атрибуты: 0..4 — вершина (binding 0), 5..8 — колонки матрицы модели
+    // Атрибуты: 0..5 — вершина (binding 0), 6..9 — колонки матрицы модели
     // (binding 1, instanced). Нумерация атрибутов сквозная по обоим bindings,
-    // поэтому добавление цвета к Vertex сдвинуло матрицу с 3..6 на 5..8.
+    // поэтому добавление цвета к Vertex сдвинуло матрицу с 3..6 на 5..8, а
+    // последующий флаг воды — на 6..9.
     std::array<VkVertexInputAttributeDescription, 10> attributeDescriptions{};
     attributeDescriptions[0].location = 0;
     attributeDescriptions[0].binding = 0;

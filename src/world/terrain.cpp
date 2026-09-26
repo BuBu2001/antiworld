@@ -125,6 +125,11 @@ Terrain::Terrain(renderer::VulkanBase& renderer, physics::PhysicsWorld& physicsW
                        format(climate_->yearLength()) + " с");
     core::Logger::info("Terrain: горы от высоты " + format(biomeParams_.mountainStart) + " до " +
                        format(biomeParams_.mountainEnd) + " ед.");
+    // Океан печатаем отдельно от биомов: доли ниже считаются по ВСЕМ узлам,
+    // включая дно, поэтому без уровня моря и доли воды их нельзя читать.
+    core::Logger::info("Terrain: море на уровне " + format(heightmap_.seaLevel()) +
+                       " ед., воды " +
+                       format(100.0f * heightmap_.waterFraction()) + "% площади");
     countBiomes(heightmap_, biomeParams_, *climate_);
     guard.committed = true;  // конструкция успешна — ресурсы за нами
 }

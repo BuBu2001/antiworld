@@ -248,14 +248,19 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     // Сортировка по mesh гарантирует, что все инстансы одного mesh идут подряд,
     // независимо от порядка обхода ECS (иначе один mesh дробился бы на множество
     // отдельных vkCmdDrawIndexed).
-    std::sort(drawData.begin(), drawData.end(),
+    //
+    // Сортируем копию: drawFrame() получает span<const DrawData>, а std::sort
+    // требует изменяемых итераторов. Сортировать сам span нельзя, а менять
+    // порядок у вызывающего мы не вправе — const-обязательство параметра.
+    sortScratch_.assign(drawData.begin(), drawData.end());
+    std::sort(sortScratch_.begin(), sortScratch_.end(),
               [](const DrawData& a, const DrawData& b) { return a.mesh < b.mesh; });
 
     std::vector<MeshDraw> meshDraws;
     std::vector<glm::mat4> modelMatrices;
-    meshDraws.reserve(drawData.size());
-    modelMatrices.reserve(drawData.size());
-    for (const DrawData& data : drawData) {
+    meshDraws.reserve(sortScratch_.size());
+    modelMatrices.reserve(sortScratch_.size());
+    for (const DrawData& data : sortScratch_) {
         if (!ownsMesh(data.mesh)) {
             throw std::runtime_error("Vulkan: mesh handle не принадлежит renderer");
         }

@@ -157,6 +157,12 @@ private:
     UniformBuffer uniformBuffer_;
     CommandBuffers commandBuffers_;
 
+    // Рабочая копия кадра для группировки по mesh в drawFrame(). drawFrame()
+    // принимает span<const DrawData>, сортировать его на месте нельзя, а
+    // переставлять элементы у вызывающего за спиной не вежливо. Буфер
+    // переиспользуется между кадрами, чтобы не аллоцировать в горячем пути.
+    std::vector<DrawData> sortScratch_;
+
     // Синхронизация: по набору на каждый кадр в полёте.
     std::vector<VkSemaphore> imageAvailableSemaphores_;
     std::vector<VkSemaphore> renderFinishedSemaphores_;
