@@ -169,6 +169,23 @@ std::size_t InstancedRenderer::spawnTrees(VulkanBase& renderer, std::size_t coun
     return placed;
 }
 
+void InstancedRenderer::ensureSorted() const {
+    if (!sortDirty_ && sortScratch_.size() == objects_.size()) return;
+    sortScratch_.clear();
+    sortScratch_.reserve(objects_.size());
+    for (std::size_t i = 0; i < objects_.size(); ++i) {
+        sortScratch_.emplace_back(objects_[i].primitive, static_cast<std::uint32_t>(i));
+    }
+    // stable_sort: инстансы одного примитива идут подряд, порядок внутри группы
+    // сохраняется (детерминированный кадр при прочих равных).
+    std::stable_sort(sortScratch_.begin(), sortScratch_.end(),
+                     [](const std::pair<std::uint16_t, std::uint32_t>& a,
+                        const std::pair<std::uint16_t, std::uint32_t>& b) {
+                         return a.first < b.first;
+                     });
+    sortDirty_ = false;
+}
+
 InstancedRenderer::CullStats InstancedRenderer::collectDraws(
     const Frustum& frustum, const awdm::dvec3& origin, std::vector<DrawData>& out) const {
     CullStats stats;
@@ -179,7 +196,7 @@ InstancedRenderer::CullStats InstancedRenderer::collectDraws(
     // создания пула; дальше переиспользуем порядок). Это нужно, чтобы
     // drawFrame() слил ВСЕ видимые деревья одного mesh в одну группу и один
     // vkCmdDrawIndexed с instanceCount=N вместо тысяч вызовов.
-    const_cast<InstancedRenderer*>(this)->ensureSorted();
+    ensureSorted();
 
     const std::size_t startOffset = out.size();
     out.reserve(startOffset + objects_.size());
@@ -199,16 +216,13 @@ InstancedRenderer::CullStats InstancedRenderer::collectDraws(
         const Primitive& primitive = primitives_[entry.first];
         if (primitive.mesh == nullptr) continue;
         out.push_back({primitive.mesh, instanceMatrix(object, origin), /*lod=*/0});
-        ++stats.visible;
-    }
+        ++stats.visible;    }
 
     // Число будущих draw calls = число разных примитивов среди принятых
     // (группы подряд идут: сортировка гарантирует смежность одного mesh).
-    std::uint16_t lastPrimitive = 0xFFFF;
     for (std::size_t i = startOffset; i < out.size(); ++i) {
         const Mesh* mesh = out[i].mesh;
         if (i == startOffset || out[i - 1].mesh != mesh) ++stats.drawCalls;
-        (void)lastPrimitive;
     }
     return stats;
 }

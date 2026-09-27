@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <random>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -112,12 +113,16 @@ private:
         std::uint32_t triangles{0};
     };
 
+    void ensureSorted() const;
+
     std::vector<Primitive> primitives_;
     std::vector<InstancedObject> objects_;
     // Буфер-накопитель выхода collectDraws (mutable-семантики избегаем:
     // collectDraws пишет в out вызывающего; этот scratch нужен только для
     // сортировки по примитиву, чтобы drawFrame() слил инстансы в один вызов).
     mutable std::vector<std::pair<std::uint16_t, std::uint32_t>> sortScratch_;
+    // Сортировка нужна только после изменения пула объектов; после — переиспользуем.
+    mutable bool sortDirty_{true};
 };
 
 }  // namespace renderer

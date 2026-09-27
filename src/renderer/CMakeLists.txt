@@ -42,6 +42,9 @@ add_library(renderer STATIC
     mesh.cpp
     pipeline.cpp
     command_buffers.cpp
+    lod_manager.cpp
+    frustum_culling.cpp
+    instanced_renderer.cpp
 )
 
 # Шейдеры собираются до/вместе с библиотекой.

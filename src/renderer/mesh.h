@@ -21,6 +21,8 @@ struct DrawData {
     DrawData() = default;
     DrawData(const Mesh* meshHandle, glm::mat4 modelMatrix)
         : mesh(meshHandle), model(modelMatrix) {}
+    DrawData(const Mesh* meshHandle, glm::mat4 modelMatrix, std::uint8_t level)
+        : mesh(meshHandle), model(modelMatrix), lod(level) {}
 
     const Mesh* mesh{nullptr};
     glm::mat4 model{1.0f};

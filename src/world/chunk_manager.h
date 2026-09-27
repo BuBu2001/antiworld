@@ -54,6 +54,8 @@
 
 #include <glm/glm.hpp>
 
+#include <entt/entt.hpp>
+
 #include "core/double_math.h"
 #include "physics/physics_world.h"
 #include "renderer/model_loader.h"
@@ -62,8 +64,6 @@
 #include "world/spatial_hash.h"
 #include "world/terrain_generator.h"
 #include "world/thread_pool.h"
-
-namespace entt { class registry; }
 
 namespace world {
 
@@ -191,11 +191,22 @@ public:
     // Все внешние объекты должны переживать ChunkManager (он не владеет ими).
     // climate может быть nullptr — тогда раскраска берёт фиксированную
     // среднегодовую температуру (автономный тестовый режим).
+    //
+    // ВНИМАНИЕ: у вложенного Config НЕЛЬЗЯ написать default-аргумент
+    // `Config config = {}` в этом же классе — вложенный класс ещё не считается
+    // завершённым, и GCC отклоняет default-аргумент
+    // ("could not convert braced-init-list to ChunkManager::Config").
+    // Поэтому конфиг по умолчанию даёт отдельная перегрузка ниже.
     ChunkManager(renderer::VulkanBase& renderer,
                  physics::PhysicsWorld& physics,
                  entt::registry& registry,
                  Climate* climate,
-                 Config config = {});
+                 const Config& config);
+    // Конфигурация по умолчанию (chunkSize/resolution/LRU из Config).
+    ChunkManager(renderer::VulkanBase& renderer,
+                 physics::PhysicsWorld& physics,
+                 entt::registry& registry,
+                 Climate* climate);
     ~ChunkManager();
 
     ChunkManager(const ChunkManager&) = delete;
@@ -310,7 +321,8 @@ private:
     ChunkIt getOrInsert(const awdm::ChunkCoord& coord);
     void touch(ChunkIt it);  // move-to-front LRU
     // Удаляет запись целиком (после выгрузки чанков вне rings+буфер).
-    void dropEntry(ChunkIt it);
+    // Возвращает итератор на следующий элемент (для безопасного erase в цикле).
+    ChunkIt dropEntry(ChunkIt it);
 
     Config config_;
     TerrainGenerator generator_;

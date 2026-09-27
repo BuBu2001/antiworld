@@ -85,7 +85,7 @@ ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
                            physics::PhysicsWorld& physics,
                            entt::registry& registry,
                            Climate* climate,
-                           Config config)
+                           const Config& config)
     : config_(config),
       generator_([&config] {
           TerrainGenerator::Config terrain = config.terrain;
@@ -106,6 +106,14 @@ ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
                        " потоков, LRU-кэш " + std::to_string(config_.maxChunksInMemory) +
                        " чанков, chunkSize " + std::to_string(config_.chunkSize) + " м");
 }
+
+// Делегирующая перегрузка: конфиг по умолчанию. Вынесена отдельно, потому что
+// default-аргумент с вложенным типом в этом же классе не компилируется.
+ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
+                           physics::PhysicsWorld& physics,
+                           entt::registry& registry,
+                           Climate* climate)
+    : ChunkManager(renderer, physics, registry, climate, Config{}) {}
 
 ChunkManager::~ChunkManager() {
     // Порядок уничтожения критичен:
