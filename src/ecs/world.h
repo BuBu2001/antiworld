@@ -1,5 +1,8 @@
 #pragma once
 
+#include <span>
+#include <vector>
+
 #include <vector>
 
 #include <entt/entt.hpp>
@@ -27,8 +30,20 @@ public:
 
     entt::entity createEntity();
     void update(float deltaTime);
-    void render();
 
+    // Рисует кадр: ECS-объекты (чанки/агенты) + внешние инстансные draw call'ы.
+    //
+    // extraDraws нужен для InstancedRenderer (деревья, камни, трава): там тысячи
+    // одинаковых объектов, у которых нет и не может быть по ECS-сущности на
+    // каждый — одна сущность означала бы один draw call. instanced-объекты
+    // приходят готовыми span'ами (по одному на mesh) и просто дописываются к
+    // общему списку; VulkanBase::drawFrame() сам объединит все DrawData одного
+    // mesh в один vkCmdDrawIndexed с instanceCount=N.
+    //
+    // Эти DrawData живут только внутри InstancedRenderer (scratch-буфер), так
+    // что копировать их в renderData_ смысла нет — render() лишь снимает
+    // указатели на время вызова drawFrame().
+    void render(std::span<const renderer::DrawData> extraDraws = {});
     // Свет и климат кадра для шейдера. Заполняется из world::Climate каждый
     // кадр (см. world::Terrain::environment) и просто перекладывается в
     // renderer::drawFrame, поэтому renderer не зависит от климата.

@@ -98,13 +98,15 @@ void InstancedRenderer::destroy(VulkanBase& renderer) {
 
 glm::mat4 InstancedRenderer::instanceMatrix(const InstancedObject& object,
                                             const awdm::dvec3& origin) noexcept {
-    // Локальные float-координаты: глобальная позиция минус floating origin
-    // (см. core/floating_origin.h). Позиция объекта уже хранится локально,
-    // поэтому здесь только T * R_y(yaw) * S(scale).
-    glm::mat4 model = glm::translate(glm::mat4{1.0f}, object.position);
+    // Глобальная double-позиция -> локальные float: разность считается в
+    // double и сужается один раз, здесь. Дальше T * R_y(yaw) * S(scale).
+    const glm::dvec3 local = awdm::toLocal(object.globalPosition, origin);
+    glm::mat4 model = glm::translate(glm::mat4{1.0f},
+                                     glm::vec3(static_cast<float>(local.x),
+                                                static_cast<float>(local.y),
+                                                static_cast<float>(local.z)));
     model = glm::rotate(model, object.yawRadians, glm::vec3{0.0f, 1.0f, 0.0f});
     return glm::scale(model, glm::vec3{object.scale});
-    (void)origin;  // позиция уже локальная; параметр оставлен для API-ясности
 }
 
 std::size_t InstancedRenderer::spawnTrees(VulkanBase& renderer, std::size_t count,
@@ -144,15 +146,11 @@ std::size_t InstancedRenderer::spawnTrees(VulkanBase& renderer, std::size_t coun
             if (!(std::isfinite(h) && h > minAboveSea)) continue;  // вода/обрыв — мимо
 
             InstancedObject object;
-            // Храним ЛОКАЛЬНУЮ позицию (floating origin вычитается при спавне;
-            // при сдвиге origin игрок пересоздаёт пул — для теста это ок, и
-            // именно так же поступают ECS-компоненты чанков).
-            object.position = glm::vec3{static_cast<float>(gx - areaCenterGlobal.x),
-                                        h,
-                                        static_cast<float>(gz - areaCenterGlobal.z)};
-            // Смещаем к центру области в ЛОКАЛЬНЫХ координатах относительно
-            // переданного areaCenter (он же и есть временной origin пула).
-            object.position += awdm::toLocal(areaCenterGlobal, areaCenterGlobal);
+            // Позиция — ГЛОБАЛЬНАЯ (gx/gz уже глобальные: центр области плюс
+            // смещение в сетке). Локальные координаты относительно floating
+            // origin вычисляются в instanceMatrix() в момент отрисовки, поэтому
+            // сдвиг origin не требует пересоздания пула.
+            object.globalPosition = glm::dvec3{gx, static_cast<double>(h), gz};
             object.yawRadians = yawDist(rng);
             object.scale = scaleDist(rng);
             object.radius = kUnitRadius * object.scale;
@@ -202,16 +200,16 @@ InstancedRenderer::CullStats InstancedRenderer::collectDraws(
     out.reserve(startOffset + objects_.size());
     for (const std::pair<std::uint16_t, std::uint32_t>& entry : sortScratch_) {
         const InstancedObject& object = objects_[entry.second];
-        // Консервативный AABB: сфера радиуса radius вокруг позиции (в double,
-        // глобальные координаты — точность как у чанкового culling).
-        const awdm::dvec3 global = awdm::toGlobal(
-            awdm::dvec3{static_cast<double>(object.position.x),
-                        static_cast<double>(object.position.y),
-                        static_cast<double>(object.position.z)},
-            origin);
+        // AABB в ЛОКАЛЬНЫХ координатах — ровно в тех же, что и плоскости
+        // frustum (view-матрица камеры строится по position() = global - origin).
+        // Считаем разность в double и только её сужаем: иначе на больших
+        // расстояниях AABB «съезжает» на метры.
+        const awdm::dvec3 local = awdm::toLocal(object.globalPosition, origin);
+        // Консервативный AABB: сфера радиуса radius*scale вокруг позиции
+        // (примитив центрирован, поворот по Y и масштаб учтены в radius).
         const double r = static_cast<double>(object.radius);
-        const AABB box{awdm::dvec3{global.x - r, global.y - r, global.z - r},
-                       awdm::dvec3{global.x + r, global.y + r, global.z + r}};
+        const AABB box{awdm::dvec3{local.x - r, local.y - r, local.z - r},
+                       awdm::dvec3{local.x + r, local.y + r, local.z + r}};
         if (!frustum.intersectsAABB(box)) continue;
         const Primitive& primitive = primitives_[entry.first];
         if (primitive.mesh == nullptr) continue;

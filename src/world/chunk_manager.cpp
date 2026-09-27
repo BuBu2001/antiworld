@@ -81,23 +81,56 @@ const char* toString(ChunkState state) {
 
 // ============================== Конструкция ==============================
 
+// Пересчёт частот шума под мировой масштаб (22 585 км на сторону).
+//
+// Дефолты TerrainGenerator::Config рассчитаны на 256x256 м игрушку:
+//   scale = 0.005         -> длина волны рельефа ~200 м;
+//   continentScale=0.0035 -> размер «материка» 1/0.0035 = 286 м.
+// На мире в 22 585 км это даёт однородный мелкий шум: материков не видно,
+// рельеф выглядит как статика. Здесь частоты подобраны так, чтобы:
+//   * базовая октава рельефа давала форму порядка десятков км;
+//   * материки были тысячи км (как настоящие);
+//   * детализация рельефа не опускалась ниже шага сетки чанка (16 м).
+void ChunkManager::Config::applyWorldScaleDefaults() {
+    // Рельеф: базовая волна ~20 км (scale = 1/20000), 9 октав с gain 0.45
+    // доходят до 20000/2^8 = 78 м — сопоставимо с шагом сетки чанка.
+    terrain.scale = 1.0f / 20000.0f;
+    terrain.octaves = 9;
+    terrain.lacunarity = 2.0f;
+    terrain.gain = 0.45f;
+    // Полуразмах рельефа: горы до ~2.5 км, равнины ±200 м. Прежние 26 м на
+    // мире в 22 585 км выглядели бы как плоская равнина с рябью.
+    terrain.amplitude = 900.0f;
+    terrain.baseLevel = 0.0f;
+
+    // Материки: базовая ячейка ~4000 км => continentScale = 1/4e6.
+    // Три октавы лакунарности 2 => крупнейшая форма 4000 км, мелкая ~1000 км.
+    terrain.geography.continentScale = 1.0f / 4000000.0f;
+    // Глубина океана 2.5 км, максимум суши 3.5 км — планетарный разброс.
+    terrain.geography.oceanDepth = 2500.0f;
+    terrain.geography.maxLandHeight = 3500.0f;
+    // Уровень моря — ноль, чтобы суша и океан были сопоставимы по площади.
+    terrain.geography.seaLevel = 0.0f;
+}
+
 ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
                            physics::PhysicsWorld& physics,
                            entt::registry& registry,
                            Climate* climate,
-                           const Config& config)
-    : config_(config),
-      generator_([&config] {
-          TerrainGenerator::Config terrain = config.terrain;
-          terrain.seed = config.seed;
-          return TerrainGenerator(terrain);
-      }()),
+                           Config config)
+    : config_(std::move(config)),
       renderer_(renderer),
       physics_(physics),
       registry_(registry),
-      climate_(climate),
-      pool_(std::make_unique<ThreadPool>(config.workerThreads)),
-      spatialHash_(config.chunkSize) {
+      climate_(climate) {
+    // Порядок важен: applyWorldScaleDefaults() переписывает частоты шума, а
+    // генератор ниже читает config_.terrain. Раньше generator_ создавался в
+    // списке инициализации (до тела конструктора), поэтому подменить
+    // конфигурацию там было нельзя.
+    config_.applyWorldScaleDefaults();
+    config_.terrain.seed = config_.seed;
+    generator_ = TerrainGenerator(config_.terrain);
+    pool_ = std::make_unique<ThreadPool>(config_.workerThreads);
     poolSlots_ = pool_->threadCount();
     if (config_.maxChunksInMemory == 0) config_.maxChunksInMemory = 1;
     if (config_.uploadsPerFrame == 0) config_.uploadsPerFrame = 1;
@@ -244,6 +277,13 @@ void ChunkManager::drainCompleted() {
         } catch (const std::exception& error) {
             // Генерация упала: чанк возвращается в очередь запросов, счётчик
             // ошибок растёт. Повторная попытка произойдёт в этом же кадре.
+            //
+            // ВАЖНО: слот пула освобождается ДО continue. Раньше `--inflight_`
+            // стоял ниже по коду, и каждый упавший future навсегда съедал один
+            // слот: после poolSlots_ неудач стриминг останавливался, новые
+            // чанки не генерировались, и update() молча ничего не делал.
+            --inflight_;
+            entry.generationFuture = {};
             ++failedGenerations_;
             entry.state = ChunkState::Requested;
             entry.queuedForPool = true;
@@ -370,6 +410,14 @@ void ChunkManager::loadChunkToGpu(ChunkIt it, std::unique_ptr<ChunkData> data) {
 
 void ChunkManager::markDesiredAndEnqueue(const awdm::dvec3& playerGlobal,
                                          double viewDistance) {
+    // СБРОС МЕТКИ ПРОШЛОГО КАДРА. inViewThisFrame выставляется заново ниже для
+    // каждого чанка текущего кольца. Без этого сброса флаг навсегда остался бы
+    // true после первого кадра, и evictOutOfSight/cancelStaleRequests никогда
+    // ничего не выгружали: память росла без ограничения, а игрок, ушедший на
+    // 10 км, тянул за собой весь мир.
+    for (ChunkEntry& entry : chunksLru_) {
+        entry.inViewThisFrame = false;
+    }
     const awdm::ChunkCoord center = worldToChunk(playerGlobal);
     const auto radiusChunks =
         static_cast<std::int64_t>(std::ceil(viewDistance / config_.chunkSize));
@@ -456,8 +504,17 @@ void ChunkManager::cancelStaleRequests(std::size_t budget) {
             continue;
         }
         if (stale && entry.state == ChunkState::Ready) {
-            // Данные уже в task queue — снимаем отметку, чтобы processReadyQueue
-            // их выбросил (сама очистка deque — при drain или в деструкторе).
+            // Данные уже в task queue. Запись стирать нельзя (в очереди лежит
+            // итератор на неё), но саму задачу обязаны убрать — иначе
+            // processReadyQueue подхватит данные чанка, который вышел из
+            // view distance, и загрузит GPU-меш в никуда.
+            const std::lock_guard<std::mutex> lock(queueMutex_);
+            for (auto q = readyQueue_.begin(); q != readyQueue_.end(); ++q) {
+                if (q->entry == it) {
+                    readyQueue_.erase(q);
+                    break;
+                }
+            }
             entry.state = ChunkState::Unloaded;
             ++cancelled;
         }
@@ -564,6 +621,59 @@ void ChunkManager::enforceLruCapacity() {
 
 // ------------------------- фоновая генерация -----------------------------
 
+namespace {
+
+// Высота рельефа в ОДНОЙ глобальной точке. Общая для generateChunkData и
+// probeHeightAt, поэтому «проба» спавна и реально загруженный рельеф не могут
+// разойтись: обе берут высоту из одного и того же места кода.
+//
+// Шум — чистая функция (seed, wx, wz) и НЕ зависит от координат чанка, поэтому
+// вызов из соседнего чанка в общей точке даёт ту же высоту (нет швов).
+float sampleWorldHeight(const world::ChunkManager::Config& cfg, double wx, double wz) {
+    const TerrainGenerator::Config& tc = cfg.terrain;
+    const GeographyConfig& geo = tc.geography;
+    PerlinNoise relief(cfg.seed);
+    PerlinNoise continents(cfg.seed ^ 0x5DEECE66Du);
+
+    // Детальный рельеф (fBm) в [-1, 1]. Координаты в double: при глобальных
+    // 2.26e7 м float32 давал бы шаг ~2 м, то есть рельеф превращался бы в
+    // лестницу из плато.
+    const float fbm = relief.fbm2D(wx * tc.scale, wz * tc.scale, tc.octaves,
+                                   tc.lacunarity, tc.gain);
+    const double detail = tc.baseLevel + static_cast<double>(tc.amplitude) * fbm;
+
+    if (!geo.enabled) {
+        return static_cast<float>(detail);
+    }
+
+    // Маска «материк/океан» — ГЛОБАЛЬНАЯ функция точки, без нормализации
+    // внутри чанка. Раньше доля воды задавалась квантилем по ВНУТРИ чанка,
+    // из-за чего каждый чанк был одинаково «океаническим» (материков не
+    // существовало) и берег рвался на границах.
+    const double coastBias = static_cast<double>(geo.coastBias);
+    const double mask = continents.fbm2D(wx * geo.continentScale, wz * geo.continentScale,
+                                         3, 2.0f, 0.5f);
+    const double sharp =
+        1.0 / static_cast<double>(std::max(0.05f, geo.coastSharpness));
+
+    if (mask >= coastBias) {
+        // Суша: от берега к вершине материка. Деталь рельефа гасится у берега,
+        // иначе шум выталкивает пляж выше уровня моря и «озёра» появляются
+        // внутри суши.
+        const double t = std::pow(
+            std::clamp((mask - coastBias) / std::max(1e-6, 1.0 - coastBias), 0.0, 1.0), sharp);
+        const double shoreFade = std::min(1.0, t * 3.0);
+        return static_cast<float>(geo.seaLevel + t * geo.maxLandHeight +
+                                  detail * shoreFade);
+    }
+    // Океан: чем глубже, тем ниже.
+    const double t = std::pow(
+        std::clamp((coastBias - mask) / std::max(1e-6, 1.0 + coastBias), 0.0, 1.0), sharp);
+    return static_cast<float>(geo.seaLevel - t * geo.oceanDepth);
+}
+
+}  // namespace
+
 std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     awdm::ChunkCoord coord) const {
     const auto t0 = std::chrono::steady_clock::now();
@@ -574,9 +684,16 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     auto data = std::make_unique<ChunkData>();
     data->coord = coord;
 
-    // --- 1) Карта высот: детерминированный seed чанка + fBm + континенты ---
-    PerlinNoise relief(mixSeed(config_.seed, coord.x, coord.z));
-    PerlinNoise continents(mixSeed(config_.seed ^ 0x5DEECE66Du, coord.x, coord.z));
+    // --- 1) Карта высот: fBm + глобальная континентальная маска ---
+    //
+    // ВАЖНО: seed шума зависит ТОЛЬКО от мира, но НЕ от координат чанка.
+    // Раньше здесь стояло PerlinNoise(mixSeed(config_.seed, coord.x, coord.z)) —
+    // то есть у СОСЕДНИХ чанков было РАЗНОЕ поле шума. На границе чанков
+    // высоты прыгали на десятки метров: мир выглядел разорванным на куски.
+    // Теперь шум — чистая функция глобальной точки, поэтому чанк, сгенерированный
+    // с любой стороны границы, даёт в общей точке ту же самую высоту.
+    PerlinNoise relief(config_.seed);
+    PerlinNoise continents(config_.seed ^ 0x5DEECE66Du);
     const TerrainGenerator::Config& tc = config_.terrain;
 
     std::vector<float> heights(static_cast<std::size_t>(res) * res);
@@ -586,66 +703,31 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     float maxHeight = std::numeric_limits<float>::lowest();
 
     const GeographyConfig& geo = tc.geography;
-    // Масштабирование рельефа под целевую долю океана (по аналогии с
-    // нормировкой в TerrainGenerator): подбираем множитель landGain так, чтобы
-    // ровно targetOceanFraction узлов оказалась ниже seaLevel. Один проход по
-    // сетке собирает сырые значения, второй — масштабирует.
-    std::vector<float> raw(static_cast<std::size_t>(res) * res);
+    // Маска «материк/океан» — ГЛОБАЛЬНАЯ функция точки, без нормализации
+    // внутри чанка.
+    //
+    // Раньше доля воды задавалась квантилем, посчитанным ПО ВНУТРИ чанка: каждый
+    // чанк растягивал себя так, чтобы ровно 62% его узлов оказалось под водой.
+    // Два следствия: (1) материков не существовало вообще — каждый чанк был
+    // одинаково «океаническим» независимо от координат; (2) соседние чанки
+    // нормализовались к разным квантилям, поэтому береговая линия рвалась на
+    // границах. Теперь знак маски решает всё: mask >= coastBias — суша,
+    // иначе океан. Берег получается непрерывной кривой на всю карту.
+    // Форма высоты живёт в sampleWorldHeight() — общей с probeHeightAt(),
+    // поэтому «проба» спавна и загруженный рельеф физически не могут разойтись.
+    std::size_t waterNodes = 0;
     for (std::uint32_t z = 0; z < res; ++z) {
         for (std::uint32_t x = 0; x < res; ++x) {
             const double wx = gx + static_cast<double>(x) * cellSize;
             const double wz = gz + static_cast<double>(z) * cellSize;
-            // Детальный рельеф (fBm) в [-1, 1].
-            const float fbm = relief.fbm2D(static_cast<float>(wx) * tc.scale,
-                                           static_cast<float>(wz) * tc.scale,
-                                           tc.octaves, tc.lacunarity, tc.gain);
-            float h = tc.baseLevel + tc.amplitude * fbm;
-            if (geo.enabled) {
-                // Континентальная маска: очень крупный шум (-1..1) -> суша/вода.
-                const float mask = continents.fbm2D(
-                    static_cast<float>(wx) * geo.continentScale,
-                    static_cast<float>(wz) * geo.continentScale, 3, 2.0f, 0.5f);
-                raw[z * static_cast<std::size_t>(res) + x] =
-                    h + mask * (geo.maxLandHeight + geo.oceanDepth) * 0.5f;
-            } else {
-                raw[z * static_cast<std::size_t>(res) + x] = h;
-            }
+            const std::size_t idx = static_cast<std::size_t>(z) * res + x;
+            const float h = sampleWorldHeight(config_, wx, wz);
+            heights[idx] = h;
+            if (h < geo.seaLevel) ++waterNodes;
         }
     }
-
-    float oceanFraction = 0.0f;
-    if (geo.enabled) {
-        // Простая калибровка: сортировка выборки (до 4096 точек) даёт квантиль
-        // для targetOceanFraction; линейный gain приводит маску к нужной доле.
-        std::vector<float> sample;
-        const std::size_t step = std::max<std::size_t>(1, raw.size() / 4096);
-        for (std::size_t i = 0; i < raw.size(); i += step) sample.push_back(raw[i]);
-        std::sort(sample.begin(), sample.end());
-        const std::size_t qIdx = static_cast<std::size_t>(
-            std::clamp(geo.targetOceanFraction, 0.05f, 0.95f) *
-            static_cast<float>(sample.size()));
-        const float q = sample[std::min(qIdx, sample.size() - 1)];
-        // Сдвигаем так, чтобы квантиль уровня targetOceanFraction лёг точно на
-        // береговую линию (seaLevel), и растягиваем сушу/океан по амплитудам.
-        const float spread = std::max(1e-3f, sample.back() - sample.front());
-        const float shoreGain = 0.5f * spread;
-        for (std::size_t i = 0; i < raw.size(); ++i) {
-            const float t = (raw[i] - q) / shoreGain;  // >0 суша, <0 вода
-            float h;
-            if (t >= 0.0f) {
-                const float sharp = std::pow(std::min(t, 1.0f), 1.0f / geo.coastSharpness);
-                h = geo.seaLevel + sharp * geo.maxLandHeight;
-            } else {
-                const float depthT = std::min(-t, 1.0f);
-                h = geo.seaLevel - depthT * geo.oceanDepth;
-            }
-            heights[i] = h;
-            if (h < geo.seaLevel) oceanFraction += 1.0f;
-        }
-        oceanFraction /= static_cast<float>(raw.size());
-    } else {
-        heights.swap(raw);
-    }
+    const float oceanFraction =
+        static_cast<float>(waterNodes) / static_cast<float>(heights.size());
 
     for (float h : heights) {
         minHeight = std::min(minHeight, h);
@@ -777,7 +859,14 @@ void ChunkManager::touch(ChunkIt it) {
 
 ChunkManager::ChunkIt ChunkManager::dropEntry(ChunkIt it) {
     // Запись можно удалять только если её чанк не держит ресурсы и не в полёте.
-    if (it->loaded || it->state == ChunkState::Generating) {
+    //
+    // ВАЖНО: отказ и для состояния Ready. В readyQueue_ лежит ReadyTask с
+    // КОПИЕЙ итератора ChunkIt на эту запись. Если erase() сделать, итератор
+    // станет висячим, и processReadyQueue() разыменует освобождённый узел
+    // списка (use-after-free). Поэтому Ready-записи тоже нельзя стирать, пока
+    // их данные не заберут (или пока очередь не опустеет).
+    if (it->loaded || it->state == ChunkState::Generating ||
+        it->state == ChunkState::Ready) {
         ++it;
         return it;  // вызывающий продолжит итерацию (безопасный отказ)
     }
@@ -810,6 +899,15 @@ float ChunkManager::heightAtGlobal(double globalX, double globalZ) const {
     const double localX = globalX - chunk.globalCenter.x + config_.chunkSize * 0.5;
     const double localZ = globalZ - chunk.globalCenter.z + config_.chunkSize * 0.5;
     return hm.sample(static_cast<float>(localX), static_cast<float>(localZ));
+}
+
+float ChunkManager::probeHeightAt(double globalX, double globalZ) const {
+    if (!std::isfinite(globalX) || !std::isfinite(globalZ)) {
+        return kNaNf;
+    }
+    // Точная формула (без округления до центра чанка) — проба должна
+    // совпадать с реальным рельефом, а не с его приближением.
+    return sampleWorldHeight(config_, globalX, globalZ);
 }
 
 bool ChunkManager::biomeAtGlobal(double globalX, double globalZ, Biome& out) const {

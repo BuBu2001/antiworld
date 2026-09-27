@@ -20,8 +20,14 @@ void World::setEnvironment(const renderer::FrameEnvironment& environment) {
     environment_ = environment;
 }
 
-void World::render() {
+void World::render(std::span<const renderer::DrawData> extraDraws) {
     renderSystem_.collect(registry_, renderData_);
+    // Инстансные объекты (деревья и т.п.) идут в том же списке: drawFrame()
+    // сгруппирует DrawData по mesh и сделает один вызов на mesh с
+    // instanceCount = N, поэтому тысячи деревьев стоят ровно один draw call.
+    // renderData_ не перевыделяем между кадрами — он и так переиспользуется.
+    renderData_.insert(renderData_.end(), extraDraws.begin(), extraDraws.end());
+
     const glm::mat4 viewProjection = camera_.projection() * camera_.view();
     renderer_.drawFrame(viewProjection, renderData_, environment_);
 }

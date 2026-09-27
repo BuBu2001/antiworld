@@ -1,9 +1,12 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <limits>
+#include <type_traits>
 
 #include <glm/glm.hpp>
 
@@ -15,14 +18,35 @@
 #include "ecs/world.h"
 #include "physics/physics_system.h"
 #include "physics/physics_world.h"
+#include "renderer/instanced_renderer.h"
 #include "renderer/model_loader.h"
 #include "renderer/vulkan_base.h"
+#include "world/chunk_manager.h"
 #include "world/climate.h"
-#include "world/terrain.h"
 
 #ifndef ANTIWORLD_ASSETS_DIR
 #define ANTIWORLD_ASSETS_DIR "assets"
 #endif
+
+namespace {
+
+// Сэмплер высоты рельефа для InstancedRenderer::spawnTrees. Сделан отдельной
+// функцией, а не лямбдой: спавн принимает УКАЗАТЕЛЬ на функцию, а у
+// captureless-лямбды оператор преобразования в указатель константный, и тип
+// не совпадает с HeightSampler.
+float chunkHeightAt(double globalX, double globalZ, void* userData) {
+    auto* manager = static_cast<world::ChunkManager*>(userData);
+    const float height = manager->heightAtGlobal(globalX, globalZ);
+    // NaN = «чанк не загружен»: спавн пропустит точку вместо того, чтобы
+    // поставить дерево в воздухе или под водой.
+    return std::isfinite(height) ? height : std::numeric_limits<float>::quiet_NaN();
+}
+
+static_assert(
+    std::is_same_v<decltype(&chunkHeightAt), renderer::InstancedRenderer::HeightSampler>,
+    "chunkHeightAt должен совпадать с InstancedRenderer::HeightSampler");
+
+}  // namespace
 
 int main() {
     core::Logger::info("AntiWorld: запуск");
@@ -41,53 +65,59 @@ int main() {
         vulkan.uploadMesh(model);
 
         core::Camera camera;
-        // Ландшафт простирается на 255 ед. по каждой оси, поэтому дальняя
-        // плоскость отсечения по умолчанию (100 ед.) срезала бы его край.
-        camera.setClipPlanes(0.5f, 600.0f);
-        camera.setSpeed(40.0f);
+        // Мир 22 585 км: ближняя плоскость 1 м (иначе при перемещении сквозь
+        // рельеф z-fighting), дальняя — с запасом над view distance, иначе
+        // дальние чанки срезаются. near=1/far=20000 даёт приемлемую
+        // точность глубины для 24-битного буфера.
+        camera.setClipPlanes(1.0f, 20000.0f);
+        camera.setSpeed(120.0f);
 
         ecs::World world(camera, vulkan);
         physics::PhysicsWorld physicsWorld;
         physics::PhysicsSystem physicsSystem(physicsWorld);
 
-        // Климат мира: время года, сезон, температура и влажность. Объявлен
-        // раньше terrain, потому что terrain берёт из него температуру для
-        // раскраски биомов и живёт только до конца main().
-        // Год по умолчанию — 10 минут (600 с), то есть сезон длится 2.5 минуты.
+        // Климат мира: время года, сезон, температура и влажность.
         world::Climate climate;
 
-        // Ландшафт 256x256 узлов: карта высот по фрактальному шуму Перлина,
-        // индексированный mesh в renderer, раскрашенный по биомам, и статический
-        // коллайдер в физике. Объявлен после renderer, физики, ECS и климата,
-        // чтобы деструктор terrain отработал раньше их уничтожения.
-        world::Terrain terrain(vulkan, physicsWorld, world.registry(), climate);
+        // === Мир: чанковый стриминг вместо ландшафта 256x256 м ===
+        //
+        // ChunkManager владеет бесконечным миром: генерирует чанки в фоновом
+        // пуле, грузит их в GPU/Jolt/ECS в главном потоке порциями
+        // (uploadsPerFrame — защита от фризов) и выгружает всё, что вышло
+        // за viewDistance. Он же пересчитывает origin (плавающее начало
+        // координат) под игрока — камере нужно лишь подхватить новый origin.
+        //
+        // Порядок объявления важен: ChunkManager должен умереть РАНЬШЕ
+        // renderer/physics/ECS, иначе его деструктор не сможет выгрузить
+        // меши и коллайдеры.
+        world::ChunkManager::Config chunkConfig;
+        chunkConfig.viewDistance = 6144.0;  // ~6 чанков радиусом
+        world::ChunkManager chunks(vulkan, physicsWorld, world.registry(), &climate,
+                                   chunkConfig);
+        const double kViewDistance = chunkConfig.viewDistance;
 
-        // Стартовая позиция камеры — над сушей, а не произвольно: с океаном
-        // примерно половина карты оказывается под водой, и точка (0,150) может
-        // оказаться посреди воды, где игрок видит пустоту вместо мира. Ищем по
-        // концентрическим кольцам первую точку суши достаточно высоко над
-        // уровнем моря и ставим камеру над ней; viewProjection считается каждый
-        // кадр из позиции камеры, так что порядок объявления camera/terrain здесь
-        // не важен — ищем уже после создания ландшафта.
-        {
-            glm::vec3 spawn{0.0f, 70.0f, 150.0f};
-            const float sea = terrain.heightmap().seaLevel();
-            for (float radius = 0.0f; radius < 110.0f; radius += 7.0f) {
-                bool found = false;
-                for (int a = 0; a < 16 && !found; ++a) {
-                    const float angle = 6.2831853f * static_cast<float>(a) / 16.0f;
-                    const float wx = radius * std::cos(angle);
-                    const float wz = radius * std::sin(angle);
-                    const float h = terrain.heightAt(wx, wz);
-                    if (h > sea + 4.0f) {
-                        spawn = {wx, h + 40.0f, wz + 60.0f};
-                        found = true;
-                    }
-                }
-                if (found) break;
-            }
-            camera.init(spawn, glm::vec3(spawn.x, sea, spawn.z - 40.0f));
-        }
+        // Стартовая позиция камеры. Глобальные координаты (double) — именно
+        // в них ChunkManager считает нужные чанки.
+        //
+        // Точка (0,0) может оказаться в океане (см. поиск суши ниже), поэтому
+        // сначала ставим камеру на безопасную высоту над уровнем моря и ждём
+        // первых загруженных чанков, после чего переносим на сушу.
+        camera.init(glm::dvec3(0.0, 600.0, 0.0), glm::dvec3(0.0, 600.0, -100.0));
+        bool spawnResolved = false;
+
+        // === Растительность: 20 000 деревьев одним draw call ===
+        //
+        // InstancedRenderer держит пул объектов, сам отсекает их по AABB
+        // относительно frustum и складывает выжившие в DrawData; drawFrame()
+        // затем сливает все инстансы одной mesh в ОДИН vkCmdDrawIndexed.
+        // Деревья ставятся по сетке с джиттером над рельефом — высота берётся
+        // из уже загруженного чанка, под водой деревья не растут.
+        renderer::InstancedRenderer instanced;
+        // Culling-плоскости кадра (локальные координаты) и буфер DrawData для
+        // инстансов. Живут вне цикла, чтобы ни culling, ни добавление draw call'ов
+        // не аллоцировали память в горячем пути.
+        renderer::Frustum frustum;
+        std::vector<renderer::DrawData> instancedDraws;
 
 
         constexpr std::size_t kAgentCount = 100;
@@ -103,12 +133,15 @@ int main() {
             const float row = static_cast<float>(index / kGridWidth);
             const float angle = kTwoPi * static_cast<float>(index) /
                                 static_cast<float>(kAgentCount);
-            // Высота берётся из карты высот, иначе часть агентов появилась бы
-            // внутри холмов (а остальные — высоко над рельефом).
-            const float worldX = kGridOffset + column * kGridSpacing;
-            const float worldZ = kGridOffset + row * kGridSpacing;
+            // Агенты ставятся над стартовой точкой. Высота земли пока
+            // неизвестна (чанки ещё генерируются асинхронно), поэтому ставим их
+            // высоко и позволяем физике уронить на рельеф: коллайдеры чанков
+            // появятся раньше, чем тела дойдут до земли.
+            const double worldX = kGridOffset + column * kGridSpacing;
+            const double worldZ = kGridOffset + row * kGridSpacing;
             const ecs::Transform transform{
-                {worldX, terrain.heightAt(worldX, worldZ) + 1.5f, worldZ},
+                {static_cast<float>(worldX - chunks.origin().x), 500.0f,
+                 static_cast<float>(worldZ - chunks.origin().z)},
                 {},
                 {0.45f, 0.45f, 0.45f}};
             const ecs::Velocity velocity{
@@ -130,9 +163,11 @@ int main() {
 
         double lastTime = glfwGetTime();
         float telemetryTimer_ = 0.0f;
+        bool treesSpawned = false;
 
         // Главный цикл рендера: обрабатываем события, рисуем кадр, повторяем.
         while (!window.shouldClose()) {
+            const auto frameStart = std::chrono::steady_clock::now();
             window.pollEvents();
 
             // Выход по Escape.
@@ -153,58 +188,163 @@ int main() {
 
             camera.update(dt, aspect);
 
+            // === Стриминг мира ===
+            //
+            // update() внутри: сдвигает origin к игроку, дренирует готовые
+            // чанки из пула, грузит до uploadsPerFrame чанков в GPU/Jolt/ECS,
+            // ставит новые задачи генерации и выгружает всё, что вышло за
+            // viewDistance. Каждый шаг ограничен бюджетом, поэтому кадр не
+            // «залипает» на генерации.
+            const glm::dvec3 camGlobal = camera.globalPosition();
+            chunks.update(camGlobal, kViewDistance);
+            // Камера подхватывает НОВЫЙ origin: её локальная позиция снова
+            // рядом с нулём, а глобальная (double) остаётся точной. Если это
+            // не сделать, сцена уедет на величину сдвига origin.
+            camera.setOrigin(glm::dvec3(chunks.origin().x, chunks.origin().y,
+                                         chunks.origin().z));
+
             // Климат: сезон, температура, положение солнца. Цвет вершин при
             // этом не пересчитывается — снег и освещение считаются в шейдере
             // из environment, поэтому год прокручивается без пересборки mesh.
-            terrain.update(dt);
+            climate.update(dt);
+
+            // Спавн на сушу — один раз, как только загрузился первый чанк.
+            // Точка (0,0) на мире с ~61% океана чаще всего под водой, и игрок
+            // стартовал бы, глядя в пустоту.
+            //
+            // Ищем по probeHeightAt(), а не по heightAtGlobal(): проба не
+            // требует загруженного чанка, поэтому можно искать сушу далеко за
+            // пределами viewDistance (6 км) и телепортироваться туда сразу.
+            if (!spawnResolved && chunks.loadedChunkCount() >= 1) {
+                spawnResolved = true;
+                const double step = chunkConfig.chunkSize;
+                double spawnX = 0.0;
+                double spawnZ = 0.0;
+                double ground = 0.0;
+                bool found = false;
+                // Расширяющиеся кольца: 0 — точка старта, дальше по 1 чанку.
+                for (int ring = 0; ring <= 600 && !found; ++ring) {
+                    for (int a = 0; a < (ring == 0 ? 1 : 16); ++a) {
+                        const double angle = 6.283185307179586 * a / 16.0;
+                        const double cx = ring * step * std::cos(angle);
+                        const double cz = ring * step * std::sin(angle);
+                        const double h = chunks.probeHeightAt(cx, cz);
+                        // Порог 8 м: не хотим встать на песчаную кромку, где
+                        // половина соседних точек в воде.
+                        if (std::isfinite(h) && h > 8.0) {
+                            spawnX = cx;
+                            spawnZ = cz;
+                            ground = h;
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (found) {
+                    // Камера — на 60 м над сушей, взгляд горизонтально (иначе W
+                    // уводит вниз, в рельеф).
+                    const glm::dvec3 eye{spawnX, ground + 60.0, spawnZ};
+                    camera.init(eye, glm::dvec3(spawnX, ground + 60.0, spawnZ - 400.0));
+                    // Сразу подстраиваем origin под новую позицию, чтобы в
+                    // этом же кадре стриминг подгрузил чанки МЕСТА спавна, а не
+                    // места старта.
+                    chunks.teleportOrigin(awdm::dvec3(spawnX, 0.0, spawnZ));
+                    camera.setOrigin(glm::dvec3(chunks.origin().x, chunks.origin().y,
+                                                 chunks.origin().z));
+                    core::Logger::info("Спавн на суше: X=" + std::to_string(spawnX) +
+                                       " Z=" + std::to_string(spawnZ) +
+                                       " высота=" + std::to_string(ground) + " м");
+                } else {
+                    core::Logger::warn(
+                        "Спавн: суша не найдена в радиусе 600 чанков, старт над океаном");
+                }
+            }
 
             world.update(dt);
             physicsSystem.update(world.registry(), dt);
-            // Свет и морозность сезона — в UBO этого кадра.
-            world.setEnvironment(terrain.environment());
-            world.render();
+            // Свет и морозность сезона — в UBO этого кадра. Раньше это делал
+            // world::Terrain::environment(); с переходом на чанковый мир
+            // FrameEnvironment собирается прямо из климата, а уровень моря
+            // берётся из географии (он общий для всего мира).
+            renderer::FrameEnvironment env;
+            env.sunDirection = climate.sunDirection();
+            env.sunIntensity = climate.sunIntensity();
+            env.ambient = climate.ambient();
+            // Морозность сезона: зимой снег ложится ниже по порогу альбедо.
+            // Значение берётся из климата (он же считает его для рельефа),
+            // чтобы вода/снег в шейдере и биомы в вершинах не расходились.
+            env.frost = climate.frost();
+            env.seaLevel = 0.0f;  // geo.seaLevel по умолчанию
+            env.hasWater = 1.0f;  // география включена: океан в мире есть
+            world.setEnvironment(env);
 
-            // Диагностика кадра: раз в 2 секунды пишем в лог позицию камеры,
-            // высоту земли под ней и число draw-вызовов. Нужна, чтобы отличить
-            // «камера не двигается» от «двигается, но мир не тот» без
-            // скриншота: если позиция стоит — вопрос ко вводу, если меняется,
-            // а draw-вызовы есть — вопрос к тому, что попадает в кадр.
+            // --- Инстансная растительность: culling + сбор DrawData ---
+            //
+            // Frustum строится в ЛОКАЛЬНЫХ координатах (те же, что у view-
+            // матрицы камеры). Инстансы хранят глобальную позицию в double и
+            // сами переводятся в локальные при отрисовке, поэтому сдвиг
+            // floating origin не требует пересоздания пула.
+            frustum.updateFromViewProjection(camera.projection() * camera.view(),
+                                             camera.globalPosition());
+            const auto tCull0 = std::chrono::steady_clock::now();
+            // collectDraws() ДОПИСЫВАЕТ в out (так счётчик drawCalls внутри
+            // считает только свои группы). Буфер обязан быть очищен вызывающим
+            // каждый кадр: иначе он растёт бесконечно — culling замедляется
+            // кадр за кадром, а в drawFrame уходят дубли прошлых кадров.
+            instancedDraws.clear();
+            const renderer::InstancedRenderer::CullStats treeCull =
+                instanced.collectDraws(frustum, chunks.origin(), instancedDraws);
+            const double cullMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                           tCull0)
+                    .count();
+            world.render(std::span<const renderer::DrawData>(instancedDraws.data(),
+                                                             instancedDraws.size()));
+            const double frameCpuMs = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - frameStart)
+                                          .count();
+
+            // Деревья расставляем один раз, когда вокруг игрока уже есть
+            // загруженные чанки с рельефом: иначе heightAtGlobal вернёт NaN и
+            // деревья окажутся в воздухе/под водой.
+            if (!treesSpawned && chunks.loadedChunkCount() >= 9) {
+                treesSpawned = true;
+                const std::size_t placed = instanced.spawnTrees(
+                    vulkan, 20000, camera.globalPosition(), 3000.0, &chunkHeightAt, &chunks,
+                    2.0f, 20240517u);
+                core::Logger::info("Растительность: " + std::to_string(placed) +
+                                   " деревьев (instancing, 1 draw call на mesh)");
+            }
+
+            // Диагностика кадра: раз в 2 секунды пишем в лог позицию камеры
+            // (ГЛОБАЛЬНУЮ, в double — именно она показывает точность на
+            // дистанции в тысячи км), состояние стриминга и origin.
             telemetryTimer_ += dt;
             if (telemetryTimer_ >= 2.0f) {
                 telemetryTimer_ = 0.0f;
-                const glm::vec3 eye = camera.position();
-                // Фокус окна важен на Wayland/Wayland-сессиях: без него GLFW не
-                // получает клавиши, и камера «не работает» при полностью живом
-                // приложении. Курсор в окне нужен для mouseDelta: без него
-                // обзор мышью не двигает камеру.
+                const glm::dvec3 eyeGlobal = camera.globalPosition();
+                const world::StreamingStats st = chunks.stats();
                 const bool focused =
                     glfwGetWindowAttrib(window.handle(), GLFW_FOCUSED) == GLFW_TRUE;
-                double cursorX = 0.0;
-                double cursorY = 0.0;
-                core::Input::mousePosition(cursorX, cursorY);
-                // Высота агентов: доказательство, что гравитация работает.
-                // Если тела не тонут — их Y застыл на старте; если проваливаются
-                // сквозь землю — Y уходит вних без остановки.
-                float agentMinY = 1e30f;
-                float agentMaxY = -1e30f;
-                for (const entt::entity entity :
-                     world.registry().view<const ecs::Transform, const ecs::Agent>()) {
-                    const float y = world.registry().get<const ecs::Transform>(entity).position.y;
-                    agentMinY = std::min(agentMinY, y);
-                    agentMaxY = std::max(agentMaxY, y);
-                }
                 core::Logger::info(
-                    "Кадр: eye=(" + std::to_string(eye.x) + "," + std::to_string(eye.y) + "," +
-                        std::to_string(eye.z) + ") земляПодКамерой=" +
-                        std::to_string(terrain.heightAt(eye.x, eye.z)) + " море=" +
-                        std::to_string(terrain.heightmap().seaLevel()) +
+                    "Кадр: eyeGlobal=(" + std::to_string(eyeGlobal.x) + "," +
+                        std::to_string(eyeGlobal.y) + "," + std::to_string(eyeGlobal.z) +
+                        ") origin=(" + std::to_string(chunks.origin().x) + "," +
+                        std::to_string(chunks.origin().z) + ") local=" +
+                        std::to_string(camera.position().x) + "," +
+                        std::to_string(camera.position().y) + "," +
+                        std::to_string(camera.position().z) +
+                        " земляПодКамерой=" +
+                        std::to_string(chunks.heightAtGlobal(eyeGlobal.x, eyeGlobal.z)) +
                         " aspect=" + std::to_string(aspect) + " drawCalls=" +
                         std::to_string(vulkan.lastFrameDrawCalls()) + " fps=" +
                         std::to_string(static_cast<int>(1.0f / (dt > 0.0f ? dt : 1.0f))) +
-                        " фокус=" + (focused ? "ДА" : "НЕТ") + " курсор=(" +
-                        std::to_string(cursorX) + "," + std::to_string(cursorY) + ") агентыY=[" +
-                        std::to_string(agentMinY) + ".." + std::to_string(agentMaxY) + "] земля=" +
-                        std::to_string(terrain.heightAt(0.0f, 0.0f)));
+                        " фокус=" + (focused ? "ДА" : "НЕТ") +
+                        " | деревья: " + std::to_string(treeCull.visible) + "/" +
+                        std::to_string(treeCull.total) + " (" +
+                        std::to_string(treeCull.drawCalls) + " instanced draw call) cull=" +
+                        std::to_string(cullMs) + "мс cpuFrame=" + std::to_string(frameCpuMs) +
+                        "мс | стриминг: " + chunks.debugLine());
             }
         }
 

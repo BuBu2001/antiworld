@@ -37,6 +37,11 @@ public:
     Camera& operator=(const Camera&) = delete;
 
     // Стартовая позиция и точка, на которую смотрим.
+    // Позиция принимается в ГЛОБАЛЬНЫХ координатах (double): на мире
+    // 22 585 км float32 имеет шаг ~2 м, и камера «заикала» бы на каждом шаге.
+    void init(const glm::dvec3& globalPosition, const glm::dvec3& globalTarget);
+
+    // Уже в локальных координатах (double) — удобно для небольших миров.
     void init(const glm::vec3& position, const glm::vec3& target);
 
     // Обновление каждый кадр: движение (WASD+Q/E), обзор (мышь), скорость
@@ -48,13 +53,35 @@ public:
     const glm::mat4& projection() const { return projection_; }
     // Единичная модель — объект (треугольник) статичен в центре сцены.
     static glm::mat4 model() { return glm::mat4(1.0f); }
-    // Позиция глаза камеры в мировых координатах.
+
+    // Позиция глаза в ГЛОБАЛЬНЫХ координатах (double) — источник истины.
+    // Именно её получает ChunkManager для расчёта нужных чанков.
+    const glm::dvec3& globalPosition() const { return globalPosition_; }
+
+    // Позиция глаза в ЛОКАЛЬНЫХ координатах (float, относительно origin) —
+    // та, что реально уходит в view-матрицу и в шейдеры. Всегда маленькая,
+    // поэтому float32 достаточен.
     const glm::vec3& position() const { return position_; }
+
+    // Смена плавающего начала координат. Вызывается каждый кадр (или при
+    // телепорте игрока): пересчитывает локальную позицию камеры из глобальной.
+    // ВАЖНО: вызывать ДО update() либо сразу после update() в том же кадре,
+    // когда origin сдвинулся, — иначе один кадр рисуется со сдвинутой сценой
+    // и несдвинутой камерой (видимый «прыжок» на величину сдвига).
+    void setOrigin(const glm::dvec3& origin);
 
     // Настройки (меняются между кадрами).
     void setSpeed(float metersPerSecond) { speed_ = metersPerSecond; }
     void setSensitivity(float radiansPerPixel) { sensitivity_ = radiansPerPixel; }
     void setFovDegrees(float fovDegrees) { fov_ = glm::radians(fovDegrees); }
+
+    // Текущие углы и направление взгляда. Нужны для телеметрии и отладки:
+    // без них нельзя отличить «камеру снесло вводом» от «камера едет сама».
+    float yaw() const noexcept { return yaw_; }
+    float pitch() const noexcept { return pitch_; }
+    const glm::vec3& front() const noexcept { return front_; }
+    const glm::vec3& right() const noexcept { return right_; }
+    float speed() const noexcept { return speed_; }
 
     // Ближняя и дальняя плоскости отсечения. Дальняя по умолчанию (100 ед.)
     // годится для небольших сцен, но ландшафт 255x255 ед. в неё не влезает —
@@ -71,6 +98,17 @@ private:
     void recomputeView();
 
     // Позиция камеры и направление взгляда в мировых координатах.
+    //
+    // Разделение намеренное:
+    //   globalPosition_ (double) — ЛОГИЧЕСКАЯ позиция в координатах мира.
+    //       Только она переживает дистанции в тысячи километров: на стороне
+    //       мира 22 585 км float32 имеет ULP ~2 м, и камера накапливала бы
+    //       ошибку до метра на каждом шаге движения.
+    //   position_ (float) — ЛОКАЛЬНАЯ позиция относительно origin_, из неё
+    //       строится view-матрица. Всегда рядом с нулём, поэтому точная.
+    //   origin_ (double) — текущее плавающее начало координат.
+    glm::dvec3 globalPosition_{0.0, 0.0, 3.0};
+    glm::dvec3 origin_{0.0, 0.0, 0.0};
     glm::vec3 position_{0.0f, 0.0f, 3.0f};
     glm::vec3 front_{0.0f, 0.0f, -1.0f};
     glm::vec3 up_{0.0f, 1.0f, 0.0f};
@@ -98,15 +136,36 @@ private:
 
 // --- Реализация (inline, header-only) ---
 
-inline void Camera::init(const glm::vec3& position, const glm::vec3& target) {
-    position_ = position;
-    front_ = glm::normalize(target - position);
+inline void Camera::init(const glm::dvec3& globalPosition, const glm::dvec3& globalTarget) {
+    globalPosition_ = globalPosition;
+    position_ = glm::vec3(globalPosition - origin_);
+
+    const glm::dvec3 dir = globalTarget - globalPosition;
+    const double len = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    front_ = (len > 0.0) ? glm::normalize(glm::vec3(static_cast<float>(dir.x / len),
+                                                     static_cast<float>(dir.y / len),
+                                                     static_cast<float>(dir.z / len)))
+                         : glm::vec3(0.0f, 0.0f, -1.0f);
 
     // Восстанавливаем стартовые углы из направления взгляда, чтобы камера
     // сразу смотрела на цель, а не вдоль +Z по умолчанию.
     yaw_ = std::atan2f(front_.z, front_.x);
-    pitch_ = std::asinf(front_.y);
+    pitch_ = std::asinf(std::clamp(front_.y, -1.0f, 1.0f));
     recomputeView();
+}
+
+inline void Camera::init(const glm::vec3& position, const glm::vec3& target) {
+    init(glm::dvec3(position), glm::dvec3(target));
+}
+
+inline void Camera::setOrigin(const glm::dvec3& origin) {
+    origin_ = origin;
+    // Локальная позиция = глобальная минус origin. Именно она уходит в
+    // view-матрицу; разность считается в double и только потом сужается до
+    // float, поэтому не теряет точность даже на краю мира.
+    const glm::dvec3 local = globalPosition_ - origin_;
+    position_ = glm::vec3(static_cast<float>(local.x), static_cast<float>(local.y),
+                          static_cast<float>(local.z));
 }
 
 inline void Camera::update(float dt, float aspect) {
@@ -152,7 +211,15 @@ inline void Camera::update(float dt, float aspect) {
     if (move != glm::vec3(0.0f)) {
         move = glm::normalize(move);
     }
-    position_ += move * velocity;
+    // Накопление позиции — в double. При скорости 40 м/с и dt ~1/60 с шаг
+    // равен 0.67 м, и в double он не теряется после 22 585 км пути.
+    const double vx = static_cast<double>(move.x) * velocity;
+    const double vy = static_cast<double>(move.y) * velocity;
+    const double vz = static_cast<double>(move.z) * velocity;
+    globalPosition_ += glm::dvec3(vx, vy, vz);
+    position_ = glm::vec3(static_cast<float>(globalPosition_.x - origin_.x),
+                          static_cast<float>(globalPosition_.y - origin_.y),
+                          static_cast<float>(globalPosition_.z - origin_.z));
 
     // === Матрицы ===
     recomputeView();

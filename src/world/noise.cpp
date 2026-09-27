@@ -75,26 +75,34 @@ void PerlinNoise::reseed(std::uint32_t seed) {
 }
 
 float PerlinNoise::noise2D(float x, float y) const {
+    return noise2D(static_cast<double>(x), static_cast<double>(y));
+}
+
+float PerlinNoise::noise2D(double x, double y) const {
     if (!std::isfinite(x) || !std::isfinite(y)) {
         return 0.0f;
     }
 
-    const int cellX = static_cast<int>(std::floor(x));
-    const int cellY = static_cast<int>(std::floor(y));
+    const double cellX = std::floor(x);
+    const double cellY = std::floor(y);
+    const std::int64_t ix = static_cast<std::int64_t>(cellX);
+    const std::int64_t iy = static_cast<std::int64_t>(cellY);
     // Смещение точки внутри ячейки: [0, 1) по каждой оси.
-    const float dx = x - static_cast<float>(cellX);
-    const float dy = y - static_cast<float>(cellY);
-    const float u = fade(dx);
-    const float v = fade(dy);
+    const double dx = x - cellX;
+    const double dy = y - cellY;
+    const double u = fadeD(dx);
+    const double v = fadeD(dy);
 
-    // Значения в четырёх углах ячейки (градиент · смещение).
-    const float n00 = gradient2D(hash(cellX, cellY), dx, dy);
-    const float n10 = gradient2D(hash(cellX + 1, cellY), dx - 1.0f, dy);
-    const float n01 = gradient2D(hash(cellX, cellY + 1), dx, dy - 1.0f);
-    const float n11 = gradient2D(hash(cellX + 1, cellY + 1), dx - 1.0f, dy - 1.0f);
+    // Значения в четырёх углах ячейки (градиент · смещение). Градиент берётся
+    // непериодическим 64-битным хешем, поэтому поле не повторяется на дистанции
+    // в десятки тысяч километров (у таблицы на 256 ячеек период 256 ячеек).
+    const double n00 = gradient2D(hashCell(ix, iy), dx, dy);
+    const double n10 = gradient2D(hashCell(ix + 1, iy), dx - 1.0, dy);
+    const double n01 = gradient2D(hashCell(ix, iy + 1), dx, dy - 1.0);
+    const double n11 = gradient2D(hashCell(ix + 1, iy + 1), dx - 1.0, dy - 1.0);
 
     // Билинейная интерполяция с квинтическим сглаживанием по каждой оси.
-    return kNormalize2D * lerp(lerp(n00, n10, u), lerp(n01, n11, u), v);
+    return static_cast<float>(kNormalize2D * lerpD(lerpD(n00, n10, u), lerpD(n01, n11, u), v));
 }
 
 float PerlinNoise::noise3D(float x, float y, float z) const {
@@ -134,16 +142,21 @@ float PerlinNoise::noise3D(float x, float y, float z) const {
 
 float PerlinNoise::fbm2D(float x, float y, int octaves, float lacunarity,
                           float gain) const {
+    return fbm2D(static_cast<double>(x), static_cast<double>(y), octaves, lacunarity, gain);
+}
+
+float PerlinNoise::fbm2D(double x, double y, int octaves, float lacunarity,
+                          float gain) const {
     if (octaves <= 0 || !std::isfinite(lacunarity) || !std::isfinite(gain)) {
         return 0.0f;
     }
 
-    float sum = 0.0f;
-    float amplitude = 1.0f;
-    float frequency = 1.0f;
+    double sum = 0.0;
+    double amplitude = 1.0;
+    double frequency = 1.0;
     // Сумма амплитуд нужна для нормировки: без неё fbm тем больше выходит за
     // [-1, 1], чем больше октав.
-    float amplitudeSum = 0.0f;
+    double amplitudeSum = 0.0;
 
     for (int octave = 0; octave < octaves; ++octave) {
         sum += amplitude * noise2D(x * frequency, y * frequency);
@@ -152,12 +165,12 @@ float PerlinNoise::fbm2D(float x, float y, int octaves, float lacunarity,
         amplitude *= gain;
     }
 
-    if (amplitudeSum <= 0.0f) {
+    if (amplitudeSum <= 0.0) {
         // Вырожденный случай: gain = 0 убивает все октавы кроме первой, а
         // отрицательная сумма амплитуд означает некорректные параметры.
         return 0.0f;
     }
-    return sum / amplitudeSum;
+    return static_cast<float>(sum / amplitudeSum);
 }
 
 float PerlinNoise::fade(float t) noexcept {
@@ -166,6 +179,28 @@ float PerlinNoise::fade(float t) noexcept {
 
 float PerlinNoise::lerp(float from, float to, float t) noexcept {
     return from + (to - from) * t;
+}
+
+double PerlinNoise::fadeD(double t) noexcept {
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+}
+
+double PerlinNoise::lerpD(double from, double to, double t) noexcept {
+    return from + (to - from) * t;
+}
+
+std::uint32_t PerlinNoise::hashCell(std::int64_t x, std::int64_t y) noexcept {
+    // splitmix64: непериодическое перемешивание 64 бит. Период таблицы
+    // перестановок (256 ячеек) на мире 510 млн км² давал бы повторение рельефа
+    // каждые 256 ячеек — то есть одинаковые материки на всей карте.
+    std::uint64_t h = static_cast<std::uint64_t>(x) * 0x9E3779B97F4A7C15ull ^
+                      static_cast<std::uint64_t>(y) * 0xC2B2AE3D27D4EB4Full;
+    h ^= h >> 30;
+    h *= 0xBF58476D1CE4E5B9ull;
+    h ^= h >> 27;
+    h *= 0x94D049BB133111EBull;
+    h ^= h >> 31;
+    return static_cast<std::uint32_t>(h >> 32);
 }
 
 int PerlinNoise::hash(int x, int y) const noexcept {
@@ -186,6 +221,11 @@ float PerlinNoise::gradient3D(int cell, float dx, float dy, float dz) const noex
     // cell может быть 0..255, а направлений 12 — приводим по модулю.
     const float* gradient = kGradients3D[cell % kGradientCount3D];
     return (gradient[0] * dx + gradient[1] * dy + gradient[2] * dz) * kInvSqrtTwo;
+}
+
+double PerlinNoise::gradient2D(std::uint32_t cell, double dx, double dy) noexcept {
+    const float* gradient = kGradients2D[cell & (kGradientCount2D - 1)];
+    return static_cast<double>(gradient[0]) * dx + static_cast<double>(gradient[1]) * dy;
 }
 
 }  // namespace world
