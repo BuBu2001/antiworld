@@ -111,10 +111,17 @@ inline void Camera::init(const glm::vec3& position, const glm::vec3& target) {
 
 inline void Camera::update(float dt, float aspect) {
     // === Обзор мышью: зажатая ЛКМ вращает камеру по смещению курсора ===
-    if (Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
-        const double dX = Input::mouseDeltaX();
-        const double dY = Input::mouseDeltaY();
+    //
+    // Дельту курсора ОБЯЗАТЕЛЬНО снимаем каждый кадр, независимо от состояния
+    // кнопки. Input::mouseDeltaX/Y() не просто читает смещение — они ещё и
+    // обновляют базовую позицию lastMouseX_/lastMouseY_. Если снимать дельту
+    // только при зажатой ЛКМ, то пока кнопка отпущена, база устаревает, и
+    // при следующем нажатии накопившееся за это время смещение (сотни пикселей)
+    // прилетает ОДНИМ рывком: камера прыгает/прыгает на исходный обзор.
+    const double dX = Input::mouseDeltaX();
+    const double dY = Input::mouseDeltaY();
 
+    if (Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
         yaw_ += static_cast<float>(dX) * sensitivity_;
         pitch_ -= static_cast<float>(dY) * sensitivity_;  // Y вверх — pitch вниз
 

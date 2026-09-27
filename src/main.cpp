@@ -182,6 +182,17 @@ int main() {
                 double cursorX = 0.0;
                 double cursorY = 0.0;
                 core::Input::mousePosition(cursorX, cursorY);
+                // Высота агентов: доказательство, что гравитация работает.
+                // Если тела не тонут — их Y застыл на старте; если проваливаются
+                // сквозь землю — Y уходит вних без остановки.
+                float agentMinY = 1e30f;
+                float agentMaxY = -1e30f;
+                for (const entt::entity entity :
+                     world.registry().view<const ecs::Transform, const ecs::Agent>()) {
+                    const float y = world.registry().get<const ecs::Transform>(entity).position.y;
+                    agentMinY = std::min(agentMinY, y);
+                    agentMaxY = std::max(agentMaxY, y);
+                }
                 core::Logger::info(
                     "Кадр: eye=(" + std::to_string(eye.x) + "," + std::to_string(eye.y) + "," +
                         std::to_string(eye.z) + ") земляПодКамерой=" +
@@ -191,7 +202,9 @@ int main() {
                         std::to_string(vulkan.lastFrameDrawCalls()) + " fps=" +
                         std::to_string(static_cast<int>(1.0f / (dt > 0.0f ? dt : 1.0f))) +
                         " фокус=" + (focused ? "ДА" : "НЕТ") + " курсор=(" +
-                        std::to_string(cursorX) + "," + std::to_string(cursorY) + ")");
+                        std::to_string(cursorX) + "," + std::to_string(cursorY) + ") агентыY=[" +
+                        std::to_string(agentMinY) + ".." + std::to_string(agentMaxY) + "] земля=" +
+                        std::to_string(terrain.heightAt(0.0f, 0.0f)));
             }
         }
 

@@ -62,8 +62,18 @@ void PhysicsSystem::syncTransforms(entt::registry& registry) {
         }
 
         if (auto* velocity = registry.try_get<ecs::Velocity>(entity)) {
-            if (!isClose(world_.bodyLinearVelocity(rigidBody.handle), velocity->value)) {
-                world_.setBodyLinearVelocity(rigidBody.handle, velocity->value);
+            // Из ECS берём ТОЛЬКО горизонтальную скорость (X/Z) — это собственное
+            // «тяготение» агента. Вертикаль (Y) принадлежит гравитации симуляции.
+            //
+            // Если перезаписывать скорость целиком каждый кадр, гравитация не
+            // успевает накопить скорость падения: за step() тело получает -g*dt
+            // по Y, а следующий кадр syncTransforms снова ставит Y=0 из ECS.
+            // Итог — падение на 0.5*g*dt^2 за кадр, то есть визуально тело
+            // висит в воздухе и не тонет.
+            const glm::vec3 current = world_.bodyLinearVelocity(rigidBody.handle);
+            const glm::vec3 desired{velocity->value.x, current.y, velocity->value.z};
+            if (!isClose(current, desired)) {
+                world_.setBodyLinearVelocity(rigidBody.handle, desired);
             }
         }
     }
