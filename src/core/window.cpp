@@ -77,9 +77,6 @@ Window::~Window() {
 void Window::pollEvents() {
     // Обрабатывает все ожидающие события и вызывает зарегистрированные колбэки.
     glfwPollEvents();
-    // Новый кадр ввода: дельты мыши считаются «на кадр», поэтому флаги
-    // consumption сбрасываются именно здесь (Input читается после pollEvents).
-    Input::startFrame();
 }
 
 bool Window::shouldClose() const {

@@ -85,7 +85,8 @@ private:
     int hash(int x, int y, int z) const noexcept;
 
     // Непериодический 64-битный хеш ячейки решётки (double-путь шума).
-    static std::uint32_t hashCell(std::int64_t x, std::int64_t y) noexcept;
+    // Смешивает seed_: без этого поля разных seed'ов совпадали бы побитово.
+    std::uint32_t hashCell(std::int64_t x, std::int64_t y) const noexcept;
 
     // Скалярное произведение градиента ячейки на смещение от угла до точки.
     float gradient2D(int cell, float dx, float dy) const noexcept;
@@ -95,6 +96,11 @@ private:
     // Таблица перестановок П (значения 0..255, каждый встречается один раз);
     // хеш — обычная формула П[x & 255] + y, всё приводится по маске.
     std::uint8_t permutation_[kTableSize]{};
+
+    // Seed, из которого построена permutation_ и которым подмешивается
+    // hashCell(). Хранится явно, потому что double-путь шума (мирового масштаба)
+    // идёт мимо permutation_ и обязан знать seed.
+    std::uint32_t seed_{kDefaultSeed};
 };
 
 }  // namespace world

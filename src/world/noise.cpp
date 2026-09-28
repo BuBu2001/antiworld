@@ -62,6 +62,10 @@ PerlinNoise::PerlinNoise(std::uint32_t seed) {
 }
 
 void PerlinNoise::reseed(std::uint32_t seed) {
+    // seed_ обновляем ДО тасования: double-путь шума (hashCell) читает его
+    // напрямую, минуя permutation_. Если забыть, reseed() перестроил бы
+    // таблицу, а мировой шум остался бы от старого seed.
+    seed_ = seed;
     XorShift32 random(seed);
     for (int i = 0; i < kTableSize; ++i) {
         permutation_[i] = static_cast<std::uint8_t>(i);
@@ -189,18 +193,24 @@ double PerlinNoise::lerpD(double from, double to, double t) noexcept {
     return from + (to - from) * t;
 }
 
-std::uint32_t PerlinNoise::hashCell(std::int64_t x, std::int64_t y) noexcept {
+std::uint32_t PerlinNoise::hashCell(std::int64_t x, std::int64_t y) const noexcept {
     // splitmix64: непериодическое перемешивание 64 бит. Период таблицы
     // перестановок (256 ячеек) на мире 510 млн км² давал бы повторение рельефа
     // каждые 256 ячеек — то есть одинаковые материки на всей карте.
+    //
+    // seed ОБЯЗАТЕЛЕН в смеси: без него hashCell статичен, и два PerlinNoise с
+    // разными seed давали бы ПОЛНОСТЬЮ одинаковое поле (seed ни на что не
+    // влиял). Соль вводится через splitmix64-финализацию — она же обеспечивает
+    // и перемешивание, поэтому одного прохода достаточно.
     std::uint64_t h = static_cast<std::uint64_t>(x) * 0x9E3779B97F4A7C15ull ^
                       static_cast<std::uint64_t>(y) * 0xC2B2AE3D27D4EB4Full;
+    h += 0x9E3779B97F4A7C15ull * (static_cast<std::uint64_t>(seed_) + 1ull);
     h ^= h >> 30;
     h *= 0xBF58476D1CE4E5B9ull;
     h ^= h >> 27;
     h *= 0x94D049BB133111EBull;
     h ^= h >> 31;
-    return static_cast<std::uint32_t>(h >> 32);
+    return static_cast<uint32_t>(h >> 32);
 }
 
 int PerlinNoise::hash(int x, int y) const noexcept {

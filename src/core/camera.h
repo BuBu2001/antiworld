@@ -166,6 +166,12 @@ inline void Camera::setOrigin(const glm::dvec3& origin) {
     const glm::dvec3 local = globalPosition_ - origin_;
     position_ = glm::vec3(static_cast<float>(local.x), static_cast<float>(local.y),
                           static_cast<float>(local.z));
+    // view_ ОБЯЗАН быть пересчитан сразу. Порядок в кадре такой: update()
+    // (считает view_) -> движение мира -> сдвиг origin -> setOrigin(). Если
+    // сдвиг случился ПОСЛЕ update(), view_ остался бы посчитан для старого
+    // origin, и кадр нарисовался бы со сдвинутой сценой и несдвинутой камерой
+    // — видимый «прыжок» величиной сдвига (на больших мирах это километры).
+    recomputeView();
 }
 
 inline void Camera::update(float dt, float aspect) {

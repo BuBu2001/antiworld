@@ -124,42 +124,67 @@ int main() {
         constexpr std::size_t kGridWidth = 10;
         constexpr float kGridSpacing = 8.0f;
         constexpr float kTwoPi = 6.28318530718f;
-        // Середина сетки агентов: агенты стоят над началом координат, где
-        // ландшафт центрирован.
+        // Середина сетки агентов относительно точки спавна.
         constexpr float kGridOffset = -0.5f * static_cast<float>(kGridWidth - 1) * kGridSpacing;
 
-        for (std::size_t index = 0; index < kAgentCount; ++index) {
-            const float column = static_cast<float>(index % kGridWidth);
-            const float row = static_cast<float>(index / kGridWidth);
-            const float angle = kTwoPi * static_cast<float>(index) /
-                                static_cast<float>(kAgentCount);
-            // Агенты ставятся над стартовой точкой. Высота земли пока
-            // неизвестна (чанки ещё генерируются асинхронно), поэтому ставим их
-            // высоко и позволяем физике уронить на рельеф: коллайдеры чанков
-            // появятся раньше, чем тела дойдут до земли.
-            const double worldX = kGridOffset + column * kGridSpacing;
-            const double worldZ = kGridOffset + row * kGridSpacing;
-            const ecs::Transform transform{
-                {static_cast<float>(worldX - chunks.origin().x), 500.0f,
-                 static_cast<float>(worldZ - chunks.origin().z)},
-                {},
-                {0.45f, 0.45f, 0.45f}};
-            const ecs::Velocity velocity{
-                {std::cos(angle) * 0.4f, 0.0f, std::sin(angle) * 0.4f}};
+        // Агенты создаются ОДИН раз и вокруг найденной суши, а не вокруг (0,0).
+        // Раньше они ставились по сетке в начале координат, но спавн игрока
+        // уехал на сушу за десятки километров: там, где стояли агенты, не было
+        // ни одного чанка, значит и коллайдера, и тела падали вечно — тест
+        // физики проверял пустоту.
+        const auto spawnAgents = [&](const awdm::dvec3& centerGlobal) {
+            for (std::size_t index = 0; index < kAgentCount; ++index) {
+                const float column = static_cast<float>(index % kGridWidth);
+                const float row = static_cast<float>(index / kGridWidth);
+                const float angle = kTwoPi * static_cast<float>(index) /
+                                    static_cast<float>(kAgentCount);
+                // Ставим высоко и позволяем физике уронить на рельеф: высота
+                // земли под точкой ещё не подтверждена загруженным чанком, а
+                // коллайдеры появятся раньше, чем тела долетят.
+                const double worldX = centerGlobal.x + kGridOffset + column * kGridSpacing;
+                const double worldZ = centerGlobal.z + kGridOffset + row * kGridSpacing;
+                const ecs::Transform transform{
+                    {static_cast<float>(worldX - chunks.origin().x), 400.0f,
+                     static_cast<float>(worldZ - chunks.origin().z)},
+                    {},
+                    {0.45f, 0.45f, 0.45f}};
+                const ecs::Velocity velocity{
+                    {std::cos(angle) * 0.4f, 0.0f, std::sin(angle) * 0.4f}};
 
-            const entt::entity entity = world.createEntity();
-            world.registry().emplace<ecs::Transform>(entity, transform);
-            world.registry().emplace<ecs::MeshRenderer>(entity, ecs::MeshRenderer{vulkan.mesh()});
-            world.registry().emplace<ecs::Velocity>(entity, velocity);
-            world.registry().emplace<ecs::RigidBody>(
-                entity,
-                ecs::RigidBody{physicsWorld.createDynamicBox(
-                    transform.scale,
-                    transform.position
-                )}
-            );
-            world.registry().emplace<ecs::Agent>(entity);
-        }
+                const entt::entity entity = world.createEntity();
+                world.registry().emplace<ecs::Transform>(entity, transform);
+                world.registry().emplace<ecs::MeshRenderer>(entity,
+                                                           ecs::MeshRenderer{vulkan.mesh()});
+                world.registry().emplace<ecs::Velocity>(entity, velocity);
+                world.registry().emplace<ecs::RigidBody>(
+                    entity,
+                    ecs::RigidBody{physicsWorld.createDynamicBox(transform.scale,
+                                                                 transform.position)});
+                world.registry().emplace<ecs::Agent>(entity);
+            }
+        };
+        bool agentsSpawned = false;
+
+        // Все чанки, которые накроет сетка агентов, должны быть загружены:
+        // иначе часть тел окажется в воздухе без коллайдера. Сетка симметрична
+        // относительно точки спавна, поэтому достаточно проверить четыре её
+        // угла — они задают границы прямоугольника, внутри которого все узлы.
+        const auto agentNeighbourhoodLoaded = [&](const awdm::dvec3& centerGlobal,
+                                                   double chunkSize) {
+            const double s = chunkSize;
+            const double cx = std::floor(centerGlobal.x / s);
+            const double cz = std::floor(centerGlobal.z / s);
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const awdm::ChunkCoord coord{static_cast<std::int64_t>(cx) + dx,
+                                                 static_cast<std::int64_t>(cz) + dz};
+                    if (!chunks.isLoaded(coord)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
 
         double lastTime = glfwGetTime();
         float telemetryTimer_ = 0.0f;
@@ -251,6 +276,20 @@ int main() {
                     chunks.teleportOrigin(awdm::dvec3(spawnX, 0.0, spawnZ));
                     camera.setOrigin(glm::dvec3(chunks.origin().x, chunks.origin().y,
                                                  chunks.origin().z));
+                    // Агенты — рядом с игроком, иначе коллайдеров под ними нет.
+                    // Но сетка 10×10 с шагом 8 м (размах 72 м) может вылезти за
+                    // границу чанка, и тогда часть тел окажется над соседним,
+                    // ещё не загруженным чанком — и будет падать вечно. Поэтому
+                    // ждём, пока загружены все чанки сетки, и только потом ставим
+                    // тела: с этого момента земля под ними гарантированно есть.
+                    if (!agentsSpawned &&
+                        agentNeighbourhoodLoaded(awdm::dvec3(spawnX, 0.0, spawnZ),
+                                                 chunkConfig.chunkSize)) {
+                        agentsSpawned = true;
+                        spawnAgents(awdm::dvec3(spawnX, 0.0, spawnZ));
+                        core::Logger::info("Агенты созданы на загруженной земле: " +
+                                           std::to_string(kAgentCount) + " тел");
+                    }
                     core::Logger::info("Спавн на суше: X=" + std::to_string(spawnX) +
                                        " Z=" + std::to_string(spawnZ) +
                                        " высота=" + std::to_string(ground) + " м");
@@ -303,7 +342,6 @@ int main() {
             const double frameCpuMs = std::chrono::duration<double, std::milli>(
                                           std::chrono::steady_clock::now() - frameStart)
                                           .count();
-
             // Деревья расставляем один раз, когда вокруг игрока уже есть
             // загруженные чанки с рельефом: иначе heightAtGlobal вернёт NaN и
             // деревья окажутся в воздухе/под водой.
@@ -314,6 +352,26 @@ int main() {
                     2.0f, 20240517u);
                 core::Logger::info("Растительность: " + std::to_string(placed) +
                                    " деревьев (instancing, 1 draw call на mesh)");
+            }
+
+            // Проверка физики: агенты должны стоять на рельефе, то есть
+            // y = высота меша + полуразмер тела. Считаем отклонение, а не
+            // абсолютную Y: так видно и «висит в воздухе», и «провалился».
+            double agentRestError = 0.0;
+            {
+                std::size_t n = 0;
+                for (const entt::entity e :
+                     world.registry().view<const ecs::Transform, const ecs::Agent>()) {
+                    const auto& tr = world.registry().get<const ecs::Transform>(e);
+                    const double h = chunks.heightAtGlobal(
+                        static_cast<double>(tr.position.x) + chunks.origin().x,
+                        static_cast<double>(tr.position.z) + chunks.origin().z);
+                    if (!std::isfinite(h)) continue;
+                    agentRestError += (static_cast<double>(tr.position.y) - h -
+                                        static_cast<double>(tr.scale.y));
+                    ++n;
+                }
+                if (n != 0) agentRestError /= static_cast<double>(n);
             }
 
             // Диагностика кадра: раз в 2 секунды пишем в лог позицию камеры
@@ -344,7 +402,10 @@ int main() {
                         std::to_string(treeCull.total) + " (" +
                         std::to_string(treeCull.drawCalls) + " instanced draw call) cull=" +
                         std::to_string(cullMs) + "мс cpuFrame=" + std::to_string(frameCpuMs) +
-                        "мс | стриминг: " + chunks.debugLine());
+                        "мс | агенты на рельефе: отклонение=" + std::to_string(agentRestError) + " м" +
+                        " yaw=" + std::to_string(camera.yaw() * 57.2958f) + "°" +
+                        " pitch=" + std::to_string(camera.pitch() * 57.2958f) + "°" +
+                        " | стриминг: " + chunks.debugLine());
             }
         }
 

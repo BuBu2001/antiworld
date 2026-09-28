@@ -91,26 +91,28 @@ const char* toString(ChunkState state) {
 //   * базовая октава рельефа давала форму порядка десятков км;
 //   * материки были тысячи км (как настоящие);
 //   * детализация рельефа не опускалась ниже шага сетки чанка (16 м).
-void ChunkManager::Config::applyWorldScaleDefaults() {
+TerrainGenerator::Config ChunkManager::Config::worldScaleTerrain() {
+    TerrainGenerator::Config cfg{};
     // Рельеф: базовая волна ~20 км (scale = 1/20000), 9 октав с gain 0.45
     // доходят до 20000/2^8 = 78 м — сопоставимо с шагом сетки чанка.
-    terrain.scale = 1.0f / 20000.0f;
-    terrain.octaves = 9;
-    terrain.lacunarity = 2.0f;
-    terrain.gain = 0.45f;
+    cfg.scale = 1.0f / 20000.0f;
+    cfg.octaves = 9;
+    cfg.lacunarity = 2.0f;
+    cfg.gain = 0.45f;
     // Полуразмах рельефа: горы до ~2.5 км, равнины ±200 м. Прежние 26 м на
     // мире в 22 585 км выглядели бы как плоская равнина с рябью.
-    terrain.amplitude = 900.0f;
-    terrain.baseLevel = 0.0f;
+    cfg.amplitude = 900.0f;
+    cfg.baseLevel = 0.0f;
 
     // Материки: базовая ячейка ~4000 км => continentScale = 1/4e6.
     // Три октавы лакунарности 2 => крупнейшая форма 4000 км, мелкая ~1000 км.
-    terrain.geography.continentScale = 1.0f / 4000000.0f;
+    cfg.geography.continentScale = 1.0f / 4000000.0f;
     // Глубина океана 2.5 км, максимум суши 3.5 км — планетарный разброс.
-    terrain.geography.oceanDepth = 2500.0f;
-    terrain.geography.maxLandHeight = 3500.0f;
+    cfg.geography.oceanDepth = 2500.0f;
+    cfg.geography.maxLandHeight = 3500.0f;
     // Уровень моря — ноль, чтобы суша и океан были сопоставимы по площади.
-    terrain.geography.seaLevel = 0.0f;
+    cfg.geography.seaLevel = 0.0f;
+    return cfg;
 }
 
 ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
@@ -123,11 +125,15 @@ ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
       physics_(physics),
       registry_(registry),
       climate_(climate) {
-    // Порядок важен: applyWorldScaleDefaults() переписывает частоты шума, а
-    // генератор ниже читает config_.terrain. Раньше generator_ создавался в
-    // списке инициализации (до тела конструктора), поэтому подменить
-    // конфигурацию там было нельзя.
-    config_.applyWorldScaleDefaults();
+    // applyWorldScaleDefaults() ЗДЕСЬ НЕ вызывается: мировые частоты уже стоят
+    // в default-инициализаторе Config::terrain. Раньше вызов был здесь, и он
+    // молча перетирал любую конфигурацию, заданную вызывающим, — параметр
+    // выглядел рабочим, а не работал. Вызвать пересчёт явно может только сам
+    // вызывающий (Config::applyWorldScaleDefaults()).
+    //
+    // Порядок важен: generator_ читает config_.terrain, поэтому присваивается
+    // seed и создаётся генератор уже в теле конструктора (в списке
+    // инициализации вложенный тип ещё не был готов).
     config_.terrain.seed = config_.seed;
     generator_ = TerrainGenerator(config_.terrain);
     pool_ = std::make_unique<ThreadPool>(config_.workerThreads);
@@ -135,6 +141,19 @@ ChunkManager::ChunkManager(renderer::VulkanBase& renderer,
     if (config_.maxChunksInMemory == 0) config_.maxChunksInMemory = 1;
     if (config_.uploadsPerFrame == 0) config_.uploadsPerFrame = 1;
     if (config_.resolution < 2) config_.resolution = 2;
+    // Jolt HeightFieldShape требует (resolution-1) кратным 4 — от этого
+    // зависит обход рёбер при построении широкофазных объёмов. Без проверки
+    // неправильное значение даёт либо исключение в Jolt, либо кривые коллайдеры
+    // на краях чанка. Приводим к ближайшему корректному и предупреждаем.
+    if ((config_.resolution - 1u) % 4u != 0u) {
+        std::uint32_t fixed = 5;
+        while (fixed < config_.resolution) fixed += 4;
+        core::Logger::warn("ChunkManager: resolution " +
+                            std::to_string(config_.resolution) +
+                            " несовместимо с Jolt ((resolution-1) кратно 4), берём " +
+                            std::to_string(fixed));
+        config_.resolution = fixed;
+    }
     core::Logger::info("ChunkManager: старт, пул " + std::to_string(poolSlots_) +
                        " потоков, LRU-кэш " + std::to_string(config_.maxChunksInMemory) +
                        " чанков, chunkSize " + std::to_string(config_.chunkSize) + " м");
@@ -286,7 +305,12 @@ void ChunkManager::drainCompleted() {
             entry.generationFuture = {};
             ++failedGenerations_;
             entry.state = ChunkState::Requested;
-            entry.queuedForPool = true;
+            // Именно false, а не true: dispatchPendingTasks() отбирает
+            // кандидатов по условию «Requested && !queuedForPool». Прежнее
+            // присваивание true делало комментарий «повтор в этом же кадре»
+            // ложью — чанк больше НИКОГДА не перегенерировался, и дыра в мире
+            // оставалась до конца сессии.
+            entry.queuedForPool = false;
             core::Logger::error(std::string("ChunkManager: генерация чанка (") +
                                 std::to_string(entry.coord.x) + "," +
                                 std::to_string(entry.coord.z) + ") упала: " + error.what());
@@ -296,8 +320,11 @@ void ChunkManager::drainCompleted() {
         entry.generationFuture = {};
 
         if (!data) {
+            // Пустой результат — тот же контракт, что и у exception: отпускаем
+            // чанк в Requested и снимаем флаг постановки в пул, иначе он
+            // зависнет навсегда.
             entry.state = ChunkState::Requested;
-            entry.queuedForPool = true;
+            entry.queuedForPool = false;
             continue;
         }
 
@@ -358,20 +385,36 @@ void ChunkManager::loadChunkToGpu(ChunkIt it, std::unique_ptr<ChunkData> data) {
     chunk.mesh = renderer_.createMesh(data->model);
 
     // --- Jolt: HeightFieldShape-коллайдер. СТРОГО главный поток. ---
+    //
+    // По контракту Jolt поверхность задаётся как
+    //     mOffset + mScale * (x, height[y * width + x], y),  x,y из [0, width-1]
+    // то есть по X она тянется от mOffset.x до mOffset.x + cellSize*(width-1),
+    // то есть шириной ровно hm.sizeX(). Тело ставится в ЦЕНТР чанка, поэтому
+    // поле надо сдвинуть на половину своей ширины:
+    //     mOffset.x = -sizeX() / 2
+    //
+    // ВАЖНО: hm.sizeX() УЖЕ в мировых единицах ((width-1) * cellSize), а не
+    // число узлов. Умножать его на cellSize повторно (как пробовали) — это
+    // сдвиг на -8184 м вместо -512, и тела «зависали» на 400 м над рельефом,
+    // цепляясь за кусок чужого чанка.
     const Heightmap& hm = data->heightmap;
-    JPH::HeightFieldShapeSettings settings(
-        hm.heights().data(),
-        JPH::Vec3(-0.5f * hm.sizeX(), 0.0f, -0.5f * hm.sizeZ()),
-        JPH::Vec3(hm.cellSize(), 1.0f, hm.cellSize()),
-        static_cast<JPH::uint>(hm.width()));
+    const JPH::Vec3 colliderOffset(-0.5f * hm.sizeX(), 0.0f, -0.5f * hm.sizeZ());
+    JPH::HeightFieldShapeSettings settings(hm.heights().data(), colliderOffset,
+                                           JPH::Vec3(hm.cellSize(), 1.0f, hm.cellSize()),
+                                           static_cast<JPH::uint>(hm.width()));
     settings.mBlockSize = 8;
     const JPH::ShapeSettings::ShapeResult shapeResult = settings.Create();
     if (shapeResult.HasError()) {
         core::Logger::error("ChunkManager: Jolt не создал высотное поле: " +
                             std::string(shapeResult.GetError().c_str()));
         renderer_.destroyMesh(chunk.mesh);
+        chunk.mesh = nullptr;
         it->state = ChunkState::Requested;
-        it->queuedForPool = true;
+        // Слот воркера освобождён — генерация завершилась успешно, не Jolt.
+        // Ставить здесь queuedForPool = true (как было) нельзя: слот уже
+        // отдан пулу, и повторная постановка в очередь навсегда теряла чанк —
+        // он больше никогда не генерировался.
+        it->queuedForPool = false;
         return;
     }
     chunk.body = physics_.createStaticShape(*shapeResult.Get().GetPtr(),
@@ -441,6 +484,17 @@ void ChunkManager::markDesiredAndEnqueue(const awdm::dvec3& playerGlobal,
                 touch(it);  // LRU: нужный чанк никогда не вытесняется первым
                 it->inViewThisFrame = true;
                 it->priorityDistance = dist;
+                // Запись в кэше может остаться в состоянии Unloaded (выгружена
+                // по LRU либо сброшена как stale-ready) — тогда это «пустая
+                // оболочка» без данных, и повторно поставить её в очередь
+                // обязан вызывающий. Раньше здесь был безусловный continue,
+                // из-за чего такой чанк больше НИКОГДА не регенерировался:
+                // вернувшись в радиус, игрок видел дыру в мире до конца сессии.
+                if (it->state == ChunkState::Unloaded) {
+                    it->state = ChunkState::Requested;
+                    it->queuedForPool = false;
+                    fresh.push_back({coord, dist});
+                }
                 continue;
             }
             fresh.push_back({coord, dist});
@@ -896,8 +950,15 @@ float ChunkManager::heightAtGlobal(double globalX, double globalZ) const {
     }
     const LoadedChunk& chunk = *it->second->loaded;
     const Heightmap& hm = chunk.data->heightmap;
-    const double localX = globalX - chunk.globalCenter.x + config_.chunkSize * 0.5;
-    const double localZ = globalZ - chunk.globalCenter.z + config_.chunkSize * 0.5;
+    // Heightmap::sample() ждёт координату ОТНОСИТЕЛЬНО ЦЕНТРА чанка: mesh и
+    // collider строятся с offsetX = -sizeX()/2, поэтому узел (width-1)/2 лежит
+    // ровно в local 0 (см. gridX = localX/cellSize + (width-1)/2).
+    //
+    // Раньше здесь стояло `+ config_.chunkSize * 0.5`, то есть выборка
+    // сдвигалась на ПОЛЧИНЫ чанка (512 м = 32 узла): heightAtGlobal() врала на
+    // десятки метров и ставила камеру/агентов не на ту высоту, что нарисована.
+    const double localX = globalX - chunk.globalCenter.x;
+    const double localZ = globalZ - chunk.globalCenter.z;
     return hm.sample(static_cast<float>(localX), static_cast<float>(localZ));
 }
 

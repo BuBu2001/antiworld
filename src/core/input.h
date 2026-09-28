@@ -37,9 +37,6 @@ public:
     static void onScroll(double xoffset, double yoffset);
 
     // Начало нового кадра: сбрасывает флаги «дельта уже снята в этом кадре».
-    // Должно вызываться ровно один раз за кадр до опроса mouseDelta*().
-    static void startFrame();
-
 private:
     // Статическое состояние (окно и накопленные значения).
     static inline GLFWwindow* window_ = nullptr;
@@ -47,11 +44,6 @@ private:
     static inline double lastMouseY_ = 0.0;
     static inline double scrollX_ = 0.0;
     static inline double scrollY_ = 0.0;
-    // Флаги «в текущем кадре дельта по X/Y уже считалась»: нужны, чтобы
-    // совместный вызов mouseDeltaX() + mouseDeltaY() не искажал вторую дельту
-    // (оба метода обновляют обе последние координаты).
-    static inline bool deltaXConsumedThisFrame_ = false;
-    static inline bool deltaYConsumedThisFrame_ = false;
 };
 
 // --- Реализация (inline, header-only) ---
@@ -87,13 +79,11 @@ inline double Input::mouseDeltaX() {
     double y = 0.0;
     mousePosition(x, y);
     const double delta = x - lastMouseX_;
-    // Обновляем обе координаты: если бы здесь обновлялась только X, а Y —
-    // в mouseDeltaY(), то при вызове обоих методов за кадр вторая дельта
-    // считалась бы от уже сдвинутого состояния и теряла/удваивала движение.
+    // Каждая ось обновляет ТОЛЬКО свою базу. Если здесь же писать lastMouseY_,
+    // то следующий mouseDeltaY() посчитает y - lastMouseY_ = y - y = 0, и
+    // вертикальный обзор умрёт навсегда: pitch нельзя было ни поднять, ни
+    // опустить, камера «прилипала» к горизонту.
     lastMouseX_ = x;
-    lastMouseY_ = y;
-    deltaXConsumedThisFrame_ = true;
-    deltaYConsumedThisFrame_ = true;
     return delta;
 }
 
@@ -102,22 +92,9 @@ inline double Input::mouseDeltaY() {
     double y = 0.0;
     mousePosition(x, y);
     const double delta = y - lastMouseY_;
-    // Если mouseDeltaX() уже снимал дельту в этом кадре, он обновил обе
-    // последние координаты — повторно трогать lastMouseX_ не нужно. Иначе
-    // (вызвали только mouseDeltaY) обновляем X тоже, чтобы следующий кадр
-    // не «наследовал» устаревшую позицию по X.
-    if (!deltaXConsumedThisFrame_) {
-        lastMouseX_ = x;
-    }
+    // Симметрично mouseDeltaX(): база по Y обновляется только здесь.
     lastMouseY_ = y;
-    deltaXConsumedThisFrame_ = true;
-    deltaYConsumedThisFrame_ = true;
     return delta;
-}
-
-inline void Input::startFrame() {
-    deltaXConsumedThisFrame_ = false;
-    deltaYConsumedThisFrame_ = false;
 }
 
 inline bool Input::consumeScroll(double& x, double& y) {
