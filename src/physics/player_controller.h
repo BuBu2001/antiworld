@@ -44,7 +44,11 @@ public:
         PhysicsWorld& world,
         float deltaTime,
         const glm::vec3& forward,
-        const glm::vec3& right
+        const glm::vec3& right,
+        // acceptInput = false: клавиатура игнорируется, но гравитация, опора
+        // и торможение продолжают работать. Так на экране карты персонаж
+        // спокойно стоит на земле, а не висит и не «улетает» без физики.
+        bool acceptInput = true
     );
 
     const State& state() const noexcept { return state_; }

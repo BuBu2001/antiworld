@@ -675,59 +675,6 @@ void ChunkManager::enforceLruCapacity() {
 
 // ------------------------- фоновая генерация -----------------------------
 
-namespace {
-
-// Высота рельефа в ОДНОЙ глобальной точке. Общая для generateChunkData и
-// probeHeightAt, поэтому «проба» спавна и реально загруженный рельеф не могут
-// разойтись: обе берут высоту из одного и того же места кода.
-//
-// Шум — чистая функция (seed, wx, wz) и НЕ зависит от координат чанка, поэтому
-// вызов из соседнего чанка в общей точке даёт ту же высоту (нет швов).
-float sampleWorldHeight(const world::ChunkManager::Config& cfg, double wx, double wz) {
-    const TerrainGenerator::Config& tc = cfg.terrain;
-    const GeographyConfig& geo = tc.geography;
-    PerlinNoise relief(cfg.seed);
-    PerlinNoise continents(cfg.seed ^ 0x5DEECE66Du);
-
-    // Детальный рельеф (fBm) в [-1, 1]. Координаты в double: при глобальных
-    // 2.26e7 м float32 давал бы шаг ~2 м, то есть рельеф превращался бы в
-    // лестницу из плато.
-    const float fbm = relief.fbm2D(wx * tc.scale, wz * tc.scale, tc.octaves,
-                                   tc.lacunarity, tc.gain);
-    const double detail = tc.baseLevel + static_cast<double>(tc.amplitude) * fbm;
-
-    if (!geo.enabled) {
-        return static_cast<float>(detail);
-    }
-
-    // Маска «материк/океан» — ГЛОБАЛЬНАЯ функция точки, без нормализации
-    // внутри чанка. Раньше доля воды задавалась квантилем по ВНУТРИ чанка,
-    // из-за чего каждый чанк был одинаково «океаническим» (материков не
-    // существовало) и берег рвался на границах.
-    const double coastBias = static_cast<double>(geo.coastBias);
-    const double mask = continents.fbm2D(wx * geo.continentScale, wz * geo.continentScale,
-                                         3, 2.0f, 0.5f);
-    const double sharp =
-        1.0 / static_cast<double>(std::max(0.05f, geo.coastSharpness));
-
-    if (mask >= coastBias) {
-        // Суша: от берега к вершине материка. Деталь рельефа гасится у берега,
-        // иначе шум выталкивает пляж выше уровня моря и «озёра» появляются
-        // внутри суши.
-        const double t = std::pow(
-            std::clamp((mask - coastBias) / std::max(1e-6, 1.0 - coastBias), 0.0, 1.0), sharp);
-        const double shoreFade = std::min(1.0, t * 3.0);
-        return static_cast<float>(geo.seaLevel + t * geo.maxLandHeight +
-                                  detail * shoreFade);
-    }
-    // Океан: чем глубже, тем ниже.
-    const double t = std::pow(
-        std::clamp((coastBias - mask) / std::max(1e-6, 1.0 + coastBias), 0.0, 1.0), sharp);
-    return static_cast<float>(geo.seaLevel - t * geo.oceanDepth);
-}
-
-}  // namespace
-
 std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     awdm::ChunkCoord coord) const {
     const auto t0 = std::chrono::steady_clock::now();
@@ -767,15 +714,17 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     // нормализовались к разным квантилям, поэтому береговая линия рвалась на
     // границах. Теперь знак маски решает всё: mask >= coastBias — суша,
     // иначе океан. Берег получается непрерывной кривой на всю карту.
-    // Форма высоты живёт в sampleWorldHeight() — общей с probeHeightAt(),
-    // поэтому «проба» спавна и загруженный рельеф физически не могут разойтись.
+    // Форма высоты живёт в TerrainGenerator::sampleHeightAt() — общей с
+    // probeHeightAt() и с картой мира (world::WorldMap), поэтому проба спавна,
+    // загруженный рельеф и карта физически не могут разойтись.
     std::size_t waterNodes = 0;
     for (std::uint32_t z = 0; z < res; ++z) {
         for (std::uint32_t x = 0; x < res; ++x) {
             const double wx = gx + static_cast<double>(x) * cellSize;
             const double wz = gz + static_cast<double>(z) * cellSize;
             const std::size_t idx = static_cast<std::size_t>(z) * res + x;
-            const float h = sampleWorldHeight(config_, wx, wz);
+            const float h = TerrainGenerator::sampleHeightAt(config_.terrain, config_.seed,
+                                                             wx, wz);
             heights[idx] = h;
             if (h < geo.seaLevel) ++waterNodes;
         }
@@ -968,7 +917,8 @@ float ChunkManager::probeHeightAt(double globalX, double globalZ) const {
     }
     // Точная формула (без округления до центра чанка) — проба должна
     // совпадать с реальным рельефом, а не с его приближением.
-    return sampleWorldHeight(config_, globalX, globalZ);
+    return TerrainGenerator::sampleHeightAt(config_.terrain, config_.seed,
+                                            globalX, globalZ);
 }
 
 bool ChunkManager::biomeAtGlobal(double globalX, double globalZ, Biome& out) const {

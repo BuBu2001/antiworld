@@ -35,13 +35,22 @@ public:
     // pipeline намеренно НЕ const: record() ведёт в нём счётчик draw-вызовов
     // (GraphicsPipeline::resetDrawCallCounter / countDrawCall), который
     // вызывающий читает после возврата.
+    // fullscreen = true: вместо обхода meshDraws записывается ОДИН
+    // vkCmdDraw(3, 1, 0, 0) — полноэкранный треугольник, вершины которого
+    // шейдер синтезирует из gl_VertexIndex. Так карта мира рисуется тем же
+    // вызовом record(), то есть внутри уже открытого render pass: рисовать
+    // ПОСЛЕ record() нельзя, он закрывает pass.
     void record(VkCommandBuffer commandBuffer, const RenderPass& renderPass,
                 size_t framebufferIndex, VkExtent2D extent,
                 GraphicsPipeline& pipeline, std::span<const MeshDraw> meshDraws,
                 VkClearColorValue clearColor, VkDescriptorSet descriptorSet,
-                VkBuffer instanceBuffer);
+                VkBuffer instanceBuffer, bool fullscreen = false);
 
     VkCommandBuffer commandBuffer(uint32_t index) const { return commandBuffers_[index]; }
+    // Пул для одноразовых command buffer'ов (загрузка текстур). Основной пул
+    // и так существует на время жизни renderer'а, поэтому отдельный создавать
+    // ради staging-буферов не нужно.
+    VkCommandPool commandPool() const { return commandPool_; }
     uint32_t count() const { return static_cast<uint32_t>(commandBuffers_.size()); }
 
 private:

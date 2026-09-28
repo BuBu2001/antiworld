@@ -23,6 +23,7 @@
 #include "renderer/model_loader.h"
 #include "renderer/vulkan_base.h"
 #include "world/chunk_manager.h"
+#include "world/world_map.h"
 #include "world/climate.h"
 
 #ifndef ANTIWORLD_ASSETS_DIR
@@ -178,6 +179,18 @@ int main() {
 
         // Сущность игрока. Пуста (entt::null), пока суша не найдена.
         entt::entity playerEntity = entt::null;
+
+        // --- Карта мира (клавиша M) ---
+        //
+        // Считается в фоне сразу при старте: 4096x2048 = 8.4 млн пикселей,
+        // каждый — две суммы fBm, это ~2-3 с. Пока считается, игра живёт как
+        // обычно, а M просто ничего не делает. Пиксели загружаются в текстуру
+        // ОДИН раз, когда генерация закончилась.
+        world::WorldMap worldMap(chunkConfig.terrain, chunkConfig.seed);
+        bool mapOpen = false;
+        bool mapKeyWasDown = false;
+        bool mapTextureUploaded = false;
+        worldMap.start();
         // Предыдущая локальная позиция тела: по разнице с текущей считается
         // вектор движения для проверки направления.
         glm::vec3 prevPlayerLocal{0.0f};
@@ -278,6 +291,32 @@ int main() {
             // Выход по Escape.
             if (core::Input::isKeyPressed(GLFW_KEY_ESCAPE)) {
                 break;
+            }
+
+            // M — карта мира. Переключение ПО ФРОНТУ нажатия, а не по
+            // удержанию: isKeyPressed() истинно всё время, пока клавиша
+            // зажата, и карта мигала бы открытой/закрытой каждый кадр.
+            const bool mapKeyDown = core::Input::isKeyPressed(GLFW_KEY_M);
+            if (mapKeyDown && !mapKeyWasDown) {
+                if (vulkan.worldMapReady()) {
+                    mapOpen = !mapOpen;
+                    core::Logger::info(mapOpen ? "Карта мира: открыта" : "Карта мира: закрыта");
+                } else {
+                    core::Logger::info("Карта мира: ещё считается, нажми M позже");
+                }
+            }
+            mapKeyWasDown = mapKeyDown;
+
+            // Текстура карты загружается один раз — 32 МБ пикселей переливать
+            // каждый кадр незачем.
+            if (!mapTextureUploaded && worldMap.ready()) {
+                vulkan.createWorldMap(worldMap.pixels().data(), worldMap.config().width,
+                                       worldMap.config().height, worldMap.pixels().size());
+                mapTextureUploaded = true;
+                core::Logger::info("Карта мира готова: суша=" +
+                                   std::to_string(worldMap.landFraction() * 100.0).substr(0, 5) +
+                                   "%, расчёт " + std::to_string(worldMap.generationMs() / 1000.0).substr(0, 4) +
+                                   " с");
             }
 
             // Кадр: dt для движения, aspect для перспективной проекции.
@@ -443,7 +482,7 @@ int main() {
             // позиция тела возвращается в ECS. Камера ведётся от тела — то есть
             // игрок стоит на рельефе под гравитацией, а не висит в воздухе.
             playerController.update(world.registry(), physicsWorld, dt,
-                                  camera.front(), camera.right());
+                                  camera.front(), camera.right(), !mapOpen);
             physicsSystem.update(world.registry(), dt);
             cameraFollowsPlayer();
             // Свет и морозность сезона — в UBO этого кадра. Раньше это делал
@@ -482,8 +521,24 @@ int main() {
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                            tCull0)
                     .count();
-            world.render(std::span<const renderer::DrawData>(instancedDraws.data(),
-                                                             instancedDraws.size()));
+            if (mapOpen) {
+                // Карта заменяет 3D-кадр: сцена не рисуется, но мир продолжает
+                // жить (стриминг, физика), поэтому маркер едет за игроком.
+                renderer::MapUniformObject mapUniform{};
+                mapUniform.player = glm::vec4(0.0f, 0.0f, 0.0035f, 0.0f);
+                if (playerEntity != entt::null) {
+                    const auto& tr =
+                        world.registry().get<const ecs::Transform>(playerEntity);
+                    const glm::vec2 uv = worldMap.uvOf(
+                        static_cast<double>(tr.position.x) + chunks.origin().x,
+                        static_cast<double>(tr.position.z) + chunks.origin().z);
+                    mapUniform.player = glm::vec4(uv.x, uv.y, 0.0035f, 1.0f);
+                }
+                vulkan.drawWorldMap(mapUniform);
+            } else {
+                world.render(std::span<const renderer::DrawData>(instancedDraws.data(),
+                                                                 instancedDraws.size()));
+            }
             const double frameCpuMs = std::chrono::duration<double, std::milli>(
                                           std::chrono::steady_clock::now() - frameStart)
                                           .count();

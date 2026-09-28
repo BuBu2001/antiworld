@@ -61,6 +61,48 @@ float Heightmap::heightAt(std::uint32_t x, std::uint32_t z) const {
     return heights_[indexOf(x, z)];
 }
 
+float TerrainGenerator::sampleHeightAt(const Config& config, std::uint32_t seed,
+                                      double wx, double wz) {
+    const GeographyConfig& geo = config.geography;
+    PerlinNoise relief(seed);
+    PerlinNoise continents(seed ^ 0x5DEECE66Du);
+
+    // Детальный рельеф (fBm) в [-1, 1]. Координаты в double: при глобальных
+    // 2.26e7 м float32 давал бы шаг ~2 м, то есть рельеф превращался бы в
+    // лестницу из плато.
+    const float fbm = relief.fbm2D(wx * config.scale, wz * config.scale, config.octaves,
+                                   config.lacunarity, config.gain);
+    const double detail = config.baseLevel + static_cast<double>(config.amplitude) * fbm;
+
+    if (!geo.enabled) {
+        return static_cast<float>(detail);
+    }
+
+    // Маска «материк/океан» — ГЛОБАЛЬНАЯ функция точки, без нормализации
+    // внутри чанка. Раньше доля воды задавалась квантилем по ВНУТРИ чанка,
+    // из-за чего каждый чанк был одинаково «океаническим» (материков не
+    // существовало) и берег рвался на границах.
+    const double coastBias = static_cast<double>(geo.coastBias);
+    const double mask = continents.fbm2D(wx * geo.continentScale, wz * geo.continentScale,
+                                         3, 2.0f, 0.5f);
+    const double sharp = 1.0 / static_cast<double>(std::max(0.05f, geo.coastSharpness));
+
+    if (mask >= coastBias) {
+        // Суша: от берега к вершине материка. Деталь рельефа гасится у берега,
+        // иначе шум выталкивает пляж выше уровня моря и «озёра» появляются
+        // внутри суши.
+        const double t = std::pow(
+            std::clamp((mask - coastBias) / std::max(1e-6, 1.0 - coastBias), 0.0, 1.0), sharp);
+        const double shoreFade = std::min(1.0, t * 3.0);
+        return static_cast<float>(geo.seaLevel + t * geo.maxLandHeight +
+                                  detail * shoreFade);
+    }
+    // Океан: чем глубже, тем ниже.
+    const double t = std::pow(
+        std::clamp((coastBias - mask) / std::max(1e-6, 1.0 + coastBias), 0.0, 1.0), sharp);
+    return static_cast<float>(geo.seaLevel - t * geo.oceanDepth);
+}
+
 float Heightmap::sample(float worldX, float worldZ) const {
     if (empty()) {
         return 0.0f;

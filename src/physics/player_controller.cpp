@@ -19,7 +19,8 @@ void PlayerController::update(
     PhysicsWorld& world,
     float deltaTime,
     const glm::vec3& forward,
-    const glm::vec3& right
+    const glm::vec3& right,
+    bool acceptInput
 ) {
     auto view = registry.view<ecs::RigidBody, ecs::Player>();
     for (const entt::entity entity : view) {
@@ -57,10 +58,12 @@ void PlayerController::update(
 
         // --- Желаемое направление в плоскости, относительно взгляда. ---
         glm::vec3 wish{0.0f};
-        if (core::Input::isKeyPressed(GLFW_KEY_W)) wish.z += 1.0f;
-        if (core::Input::isKeyPressed(GLFW_KEY_S)) wish.z -= 1.0f;
-        if (core::Input::isKeyPressed(GLFW_KEY_D)) wish.x += 1.0f;
-        if (core::Input::isKeyPressed(GLFW_KEY_A)) wish.x -= 1.0f;
+        if (acceptInput) {
+            if (core::Input::isKeyPressed(GLFW_KEY_W)) wish.z += 1.0f;
+            if (core::Input::isKeyPressed(GLFW_KEY_S)) wish.z -= 1.0f;
+            if (core::Input::isKeyPressed(GLFW_KEY_D)) wish.x += 1.0f;
+            if (core::Input::isKeyPressed(GLFW_KEY_A)) wish.x -= 1.0f;
+        }
         if (wish != glm::vec3(0.0f)) {
             // Базис берём у камеры: forward — куда смотрим, right — вправо от
             // взгляда. Оба проецируем на XZ: вертикальный компонент (pitch) в
@@ -81,8 +84,9 @@ void PlayerController::update(
             wish = glm::normalize(wish.z * flatForward + wish.x * flatRight);
         }
 
-        const bool running = core::Input::isKeyPressed(GLFW_KEY_LEFT_SHIFT) ||
-                             core::Input::isKeyPressed(GLFW_KEY_RIGHT_SHIFT);
+        const bool running =
+            acceptInput && (core::Input::isKeyPressed(GLFW_KEY_LEFT_SHIFT) ||
+                            core::Input::isKeyPressed(GLFW_KEY_RIGHT_SHIFT));
         player.running = running;
         state_.running = running;
         const float targetSpeed = (running ? player.runSpeed : player.walkSpeed) *
@@ -107,7 +111,7 @@ void PlayerController::update(
 
         // --- Прыжок: только с опоры, и только вверх. ---
         float newVertical = velocity.y;
-        if (grounded && core::Input::isKeyPressed(GLFW_KEY_SPACE)) {
+        if (grounded && acceptInput && core::Input::isKeyPressed(GLFW_KEY_SPACE)) {
             newVertical = player.jumpSpeed;
             // Прыжок засчитываем сразу: до следующего шага луч ещё достаёт
             // землю, и персонаж «уже стоял» — иначе кадр задержки на ровном

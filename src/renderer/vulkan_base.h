@@ -21,6 +21,7 @@
 #include "renderer/pipeline.h"
 #include "renderer/render_pass.h"
 #include "renderer/uniform_buffer.h"
+#include "renderer/world_map_pass.h"
 
 namespace core {
 class Window;
@@ -89,6 +90,19 @@ public:
     void drawFrame(const glm::mat4& viewProjection, std::span<const DrawData> drawData,
                    const FrameEnvironment& environment);
 
+    // === Карта мира ===
+    //
+    // Загружает готовую картинку мира в текстуру и поднимает проход карты.
+    // pixels — RGBA8, width*height*4 байт, tightly packed. Вызывается один
+    // раз, когда world::WorldMap закончила генерацию в фоне.
+    void createWorldMap(const void* pixels, uint32_t width, uint32_t height,
+                        size_t pixelBytes);
+    // Рисует кадр карты: полноэкранный треугольник с текстурой мира и
+    // маркером игрока. Список объектов пустой — 3D-кадр в этом вызове не рисуется.
+    void drawWorldMap(const MapUniformObject& uniform);
+    // Готова ли карта к отрисовке (текстура загружена, проход создан).
+    bool worldMapReady() const noexcept { return worldMapPass_.ready(); }
+
     // Освобождает все Vulkan-ресурсы в правильном порядке.
     void cleanup();
 
@@ -117,6 +131,18 @@ private:
 
     void createSyncObjects();
     void recreateSyncPrimitives();
+
+    // Общая для всех кадров (сцена и карта) синхронизация: ожидание fence,
+    // захват изображения swapchain, отправка и презентация. Вынесено отдельно,
+    // потому что drawFrame и drawWorldMap обязаны вести себя ОДИНАКОВО: своя
+    // копия этого кода в двух местах — верный способ однажды забыть fence или
+    // обработку OUT_OF_DATE в одном из путей.
+    struct FrameAcquire {
+        uint32_t imageIndex = 0;
+        bool skip = false;  // swapchain устарел — кадр не рисуем
+    };
+    FrameAcquire acquireFrame();
+    void submitAndPresent(VkCommandBuffer commandBuffer, uint32_t imageIndex);
 
     // Пересоздание swapchain при изменении размера окна.
     void cleanupSwapChain();
@@ -160,6 +186,10 @@ private:
     // Модульные объекты рендера.
     RenderPass renderPass_;
     GraphicsPipeline pipeline_;
+    // Карта мира: текстура (не зависит от swapchain и переживает resize) и
+    // проход (пайплайн зависит от render pass, поэтому пересоздаётся вместе с ним).
+    Texture worldMapTexture_;
+    WorldMapPass worldMapPass_;
     Mesh mesh_;
     // Прочие mesh (террейн и т.п.), созданные через createMesh.
     std::vector<std::unique_ptr<Mesh>> ownedMeshes_;

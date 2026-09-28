@@ -14,6 +14,8 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADER_SOURCES
     ${CMAKE_SOURCE_DIR}/shaders/triangle.vert
     ${CMAKE_SOURCE_DIR}/shaders/triangle.frag
+    ${CMAKE_SOURCE_DIR}/shaders/map.vert
+    ${CMAKE_SOURCE_DIR}/shaders/map.frag
 )
 
 set(SHADER_OUTPUTS)
@@ -38,6 +40,8 @@ add_library(renderer STATIC
     uniform_buffer.cpp
     render_pass.cpp
     vertex_buffer.cpp
+    texture.cpp
+    world_map_pass.cpp
     model_loader.cpp
     mesh.cpp
     pipeline.cpp

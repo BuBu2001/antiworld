@@ -57,7 +57,8 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
                             size_t framebufferIndex, VkExtent2D extent,
                             GraphicsPipeline& pipeline,
                             std::span<const MeshDraw> meshDraws, VkClearColorValue clearColor,
-                            VkDescriptorSet descriptorSet, VkBuffer instanceBuffer) {
+                            VkDescriptorSet descriptorSet, VkBuffer instanceBuffer,
+                            bool fullscreen) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -111,6 +112,12 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
     // матрицы объектов — из общего instance-буфера со смещением на начало
     // группы. Именно здесь отсечённые CPU-отсечением чанки НЕ порождают
     // вызовов: их просто нет в meshDraws.
+    if (fullscreen) {
+        // Три вершины, один инстанс, без вершинного и индексного буферов.
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        pipeline.countDrawCall();
+    }
+
     for (const MeshDraw& draw : meshDraws) {
         if (draw.mesh == nullptr || !draw.mesh->initialized() || draw.instanceCount == 0 ||
             instanceBuffer == VK_NULL_HANDLE) {

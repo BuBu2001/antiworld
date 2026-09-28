@@ -30,6 +30,9 @@ const std::vector<const char*> kDeviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_N
 
 // Тёмно-синий цвет очистки экрана (RGBA, 0.0 - 1.0).
 const VkClearColorValue kClearColor{0.07f, 0.08f, 0.24f, 1.0f};
+// Очистка под картой мира: почти чёрный синий, чтобы кадр не «мигал» между
+// картой и очисткой в местах, где текстура ещё не успела отрисоваться.
+const VkClearColorValue kMapClearColor{0.02f, 0.03f, 0.07f, 1.0f};
 
 // Глобальная проверка результата вызова Vulkan; при ошибке бросает исключение.
 void checkVk(VkResult result, const char* expr, const char* file, int line) {
@@ -222,9 +225,17 @@ void VulkanBase::createRenderTargets() {
                                    depthImageView_);
     uniformBuffer_.init(device_, physicalDevice_, kMaxFramesInFlight);
     pipeline_.init(device_, renderPass_.handle(), uniformBuffer_.layout());
+    // Проход карты пересоздаём вместе с render pass: его пайплайн собран под
+    // формат swapchain. Текстура карты при этом сохраняется — от swapchain она
+    // не зависит, и перезаливать 32 МБ пикселей при каждом resize незачем.
+    worldMapPass_.init(device_, physicalDevice_, renderPass_.handle(), kMaxFramesInFlight);
+    if (worldMapTexture_.initialized()) {
+        worldMapPass_.setTexture(&worldMapTexture_);
+    }
 }
 
 void VulkanBase::destroyRenderTargets() {
+    worldMapPass_.destroy();
     pipeline_.destroy();
     uniformBuffer_.destroy();
     renderPass_.destroy();
@@ -294,8 +305,11 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     }
     const std::span<const MeshDraw> meshDraws{meshDrawScratch_};
 
-    vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
-                    std::numeric_limits<uint64_t>::max());
+    const FrameAcquire acquired = acquireFrame();
+    if (acquired.skip) {
+        return;
+    }
+    const uint32_t imageIndex = acquired.imageIndex;
 
     VkBuffer instanceBuffer = VK_NULL_HANDLE;
     uint32_t instanceCount = static_cast<uint32_t>(modelMatrixScratch_.size());
@@ -312,28 +326,6 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
         instanceBuffer = buffer.handle();
     }
 
-    uint32_t imageIndex = 0;
-    const VkResult acquireResult = vkAcquireNextImageKHR(
-        device_, swapChain_, std::numeric_limits<uint64_t>::max(),
-        imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &imageIndex);
-
-    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
-        // ВНИМАНИЕ: семафор imageAvailable_[currentFrame_] был передан в acquire
-        // и мог быть сигнален даже при ошибке. Пересоздаём синхронизационные
-        // примитивы, чтобы на следующем кадре не переиспользовать «висячий»
-        // сигнальный семафор (иначе vkQueueSubmit будет ждать никогда не
-        // сбрасываемый сигнал либо использовать уже знавший семафор).
-        // Перед удалением убеждаемся, что GPU завершил все операции.
-        vkDeviceWaitIdle(device_);
-        recreateSyncPrimitives();
-        recreateSwapChain();
-        return;
-    }
-    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
-        throw std::runtime_error("Vulkan: не удалось захватить изображение swapchain");
-    }
-
-    vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
     VkCommandBuffer commandBuffer = commandBuffers_.commandBuffer(currentFrame_);
     vkResetCommandBuffer(commandBuffer, 0);
     UniformBufferObject frameData{};
@@ -357,6 +349,43 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     // frustum culling на стороне вызывающего — см. CullingStats).
     lastDrawCalls_ = pipeline_.lastDrawCalls();
 
+    submitAndPresent(commandBuffer, imageIndex);
+
+    currentFrame_ = (currentFrame_ + 1) % kMaxFramesInFlight;
+}
+
+VulkanBase::FrameAcquire VulkanBase::acquireFrame() {
+    FrameAcquire result{};
+
+    vkWaitForFences(device_, 1, &inFlightFences_[currentFrame_], VK_TRUE,
+                    std::numeric_limits<uint64_t>::max());
+
+    const VkResult acquireResult = vkAcquireNextImageKHR(
+        device_, swapChain_, std::numeric_limits<uint64_t>::max(),
+        imageAvailableSemaphores_[currentFrame_], VK_NULL_HANDLE, &result.imageIndex);
+
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+        // ВНИМАНИЕ: семафор imageAvailable_[currentFrame_] был передан в acquire
+        // и мог быть сигнален даже при ошибке. Пересоздаём синхронизационные
+        // примитивы, чтобы на следующем кадре не переиспользовать «висячий»
+        // сигнальный семафор (иначе vkQueueSubmit будет ждать никогда не
+        // сбрасываемый сигнал либо использовать уже знавший семафор).
+        // Перед удалением убеждаемся, что GPU завершил все операции.
+        vkDeviceWaitIdle(device_);
+        recreateSyncPrimitives();
+        recreateSwapChain();
+        result.skip = true;
+        return result;
+    }
+    if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+        throw std::runtime_error("Vulkan: не удалось захватить изображение swapchain");
+    }
+
+    vkResetFences(device_, 1, &inFlightFences_[currentFrame_]);
+    return result;
+}
+
+void VulkanBase::submitAndPresent(VkCommandBuffer commandBuffer, uint32_t imageIndex) {
     const std::array<VkSemaphore, 1> waitSemaphores = {
         imageAvailableSemaphores_[currentFrame_]};
     const std::array<VkPipelineStageFlags, 1> waitStages = {
@@ -394,7 +423,42 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     } else if (presentResult != VK_SUCCESS) {
         throw std::runtime_error("Vulkan: vkQueuePresentKHR завершился ошибкой");
     }
+}
 
+void VulkanBase::createWorldMap(const void* pixels, uint32_t width, uint32_t height,
+                                size_t pixelBytes) {
+    worldMapTexture_.init(device_, physicalDevice_, commandBuffers_.commandPool(),
+                          graphicsQueue_, width, height, pixels, pixelBytes);
+    worldMapPass_.setTexture(&worldMapTexture_);
+    core::Logger::info("Vulkan: текстура карты мира загружена (" +
+                       std::to_string(width) + "x" + std::to_string(height) + ")");
+}
+
+void VulkanBase::drawWorldMap(const MapUniformObject& uniform) {
+    if (!worldMapPass_.ready()) {
+        return;
+    }
+    const FrameAcquire acquired = acquireFrame();
+    if (acquired.skip) {
+        return;
+    }
+    const uint32_t imageIndex = acquired.imageIndex;
+
+    VkCommandBuffer commandBuffer = commandBuffers_.commandBuffer(currentFrame_);
+    vkResetCommandBuffer(commandBuffer, 0);
+    worldMapPass_.update(currentFrame_, uniform);
+
+    // Список объектов пустой: карта рисуется одним полноэкранным треугольником
+    // в шейдере, 3D-сцена в этом кадре не выводится. Цвет очистки — тёмно-синий,
+    // чтобы полосы за пределами карты (их не бывает при CLAMP_TO_EDGE) не мигали.
+    const std::span<const MeshDraw> noDraws{};
+    commandBuffers_.record(commandBuffer, renderPass_, imageIndex, swapChainExtent_,
+                           worldMapPass_.pipeline(), noDraws, kMapClearColor,
+                           worldMapPass_.descriptorSet(currentFrame_), VK_NULL_HANDLE,
+                           /*fullscreen=*/true);
+
+    lastDrawCalls_ = worldMapPass_.pipeline().lastDrawCalls();
+    submitAndPresent(commandBuffer, imageIndex);
     currentFrame_ = (currentFrame_ + 1) % kMaxFramesInFlight;
 }
 

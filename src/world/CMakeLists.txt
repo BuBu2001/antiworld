@@ -6,6 +6,7 @@ add_library(world STATIC
     biome.cpp
     climate.cpp
     terrain_generator.cpp
+    world_map.cpp
     terrain.cpp
     spatial_hash.cpp
     chunk_manager.cpp

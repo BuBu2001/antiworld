@@ -32,12 +32,14 @@ GraphicsPipeline::~GraphicsPipeline() {
 }
 
 void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
-                           VkDescriptorSetLayout descriptorSetLayout) {
+                           VkDescriptorSetLayout descriptorSetLayout, bool fullscreen) {
     device_ = device;
 
     // Шейдерные модули: вершинный и фрагментный (скомпилированы glslc'ом).
-    Shader vertexShader(device_, shaderPath("triangle.vert.spv"));
-    Shader fragmentShader(device_, shaderPath("triangle.frag.spv"));
+    Shader vertexShader(
+        device_, shaderPath(fullscreen ? "map.vert.spv" : "triangle.vert.spv"));
+    Shader fragmentShader(
+        device_, shaderPath(fullscreen ? "map.frag.spv" : "triangle.frag.spv"));
 
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
     shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -50,6 +52,8 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     shaderStages[1].module = fragmentShader.handle();
     shaderStages[1].pName = "main";
 
+    // В режиме карты вершин нет вообще: gl_VertexIndex. Оставляем пустые
+    // массивы и нулевые счётчики, состояние ниже остаётся валидным.
     std::array<VkVertexInputBindingDescription, 2> bindingDescriptions{};
     bindingDescriptions[0].binding = 0;
     bindingDescriptions[0].stride = sizeof(Vertex);
@@ -108,10 +112,10 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexBindingDescriptionCount =
-        static_cast<uint32_t>(bindingDescriptions.size());
+        fullscreen ? 0u : static_cast<uint32_t>(bindingDescriptions.size());
     vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions.data();
     vertexInputInfo.vertexAttributeDescriptionCount =
-        static_cast<uint32_t>(attributeDescriptions.size());
+        fullscreen ? 0u : static_cast<uint32_t>(attributeDescriptions.size());
     vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
     // Сборка треугольников из каждых трёх вершин.
@@ -145,8 +149,10 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
+    // Карта рисуется поверх очищенного кадра: depth отключён, иначе полно-
+    // экранный треугольник отсекался бы очищенной глубиной 1.0.
+    depthStencil.depthTestEnable = fullscreen ? VK_FALSE : VK_TRUE;
+    depthStencil.depthWriteEnable = fullscreen ? VK_FALSE : VK_TRUE;
     depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
