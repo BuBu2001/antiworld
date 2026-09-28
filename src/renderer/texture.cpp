@@ -132,7 +132,14 @@ void Texture::init(VkDevice device, VkPhysicalDevice physicalDevice,
     samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     // CLAMP_TO_EDGE, а не REPEAT: за краем карты показываем крайнюю точку, а
     // не зеркалим материки — зеркалирование читалось бы как «ещё одна суша».
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    // U — долгота, и на сфере u=0 и u=1 это ОДИН меридиан. С CLAMP_TO_EDGE
+    // билинейная фильтрация усредняла бы последний пиксель с первым, то есть
+    // рисовала бы шов шириной в один тексель поверх шва данных. REPEAT даёт
+    // корректную фильтрацию через край.
+    //
+    // V — широта, и periodic там нельзя: полюса не периодичны, полюс — это
+    // одна точка, а не петля. Поэтому V остаётся CLAMP_TO_EDGE.
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.maxLod = 0.0f;

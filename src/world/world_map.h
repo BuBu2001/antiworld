@@ -33,7 +33,7 @@ public:
         std::uint32_t width{4096};
         std::uint32_t height{2048};
         // Сторона мира в метрах (22 585 км).
-        double extent{22585000.0};
+        double extent{world::kWorldExtent};
     };
 
     // Два конструктора вместо одного с аргументом по умолчанию: NSDMI вложенной

@@ -1,5 +1,7 @@
 #include "world/world_map.h"
 
+#include "core/logger.h"
+
 #include <algorithm>
 #include <chrono>
 
@@ -45,6 +47,51 @@ WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed)
 WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed, Config cfg)
     : terrain_(terrain), seed_(seed), config_(cfg) {
     pixels_.reserve(static_cast<std::size_t>(config_.width) * config_.height * 4);
+
+    // Шов карты сомкнётся ТОЧНО, если extent*scale и extent*continentScale —
+    // ЧЁТНЫЕ целые числа ячеек решётки. Молча пропустить это нельзя: получится
+    // ровно тот дефект, ради которого добавлена периодичность, а диагностировать
+    // его потом нечем — край карты просто выглядит «склеенным».
+    //
+    // Почему именно чётное: координата края (x/extent)*periodCells на x=±extent/2
+    // равна ±periodCells/2. При нечётном periodCells это полуцелое, и дробные
+    // части решётки с двух сторон края совпадают лишь с точностью до последнего
+    // бита double — на практике шов прыгал на 0.08 м. При чётном это целое
+    // число, поэтому совпадение побитовое.
+    //
+    // Критерий не «равно целому», а «остаток меньше сотой пикселя карты».
+    // Точность не обязана быть абсолютной: остаток в ячейках превращается в
+    // остаток по долготе, и важен он ровно настолько, насколько заметен.
+    // Нечётность при этом не прощается никогда: это уже заметный дефект.
+    const double pixel = config_.extent / static_cast<double>(config_.width);
+    const auto check = [this, pixel](const char* name, double scale) {
+        const double cells = config_.extent * scale;
+        const std::int64_t period = std::llround(cells);
+        const double residualMeters = std::abs(cells - static_cast<double>(period)) / scale;
+        if (period <= 0) {
+            core::Logger::log(core::LogLevel::Warn,
+                              std::string("WorldMap: ") + name +
+                                  " даёт неположительный период, карта не сомкнётся");
+            return;
+        }
+        if (period % 2 != 0) {
+            core::Logger::log(
+                core::LogLevel::Warn,
+                std::string("WorldMap: ") + name + " даёт нечётный период " +
+                    std::to_string(period) +
+                    " ячеек, край карты будет со швом; сделай extent*scale чётным");
+        }
+        if (residualMeters > pixel * 0.01) {
+            core::Logger::log(
+                core::LogLevel::Warn,
+                "WorldMap: остаток периода по " + std::string(name) + " = " +
+                    std::to_string(static_cast<int>(residualMeters)) + " м (" +
+                    std::to_string(static_cast<int>(residualMeters / pixel)) +
+                    " пикселей карты), шов не сомкнётся");
+        }
+    };
+    check("scale", terrain_.scale);
+    check("continentScale", terrain_.geography.continentScale);
 }
 
 WorldMap::~WorldMap() {
@@ -89,8 +136,11 @@ void WorldMap::generate() {
         for (std::size_t i = 0; i < width; ++i) {
             const double wx = -half + config_.extent * (static_cast<double>(i) + 0.5) /
                                          static_cast<double>(width);
-            // Ровно та же функция, что строит рельеф чанков.
-            const float h = TerrainGenerator::sampleHeightAt(terrain_, seed_, wx, wz);
+            // Ровно та же функция, что строит рельеф чанков, плюс период по X:
+            // карта натягивается на сферу, где левый и правый край — один и тот
+            // же меридиан, поэтому рельеф по X обязан быть периодичным.
+            const float h = TerrainGenerator::sampleHeightAt(terrain_, seed_, wx, wz,
+                                                              config_.extent);
 
             const glm::vec3 color = (h < seaLevel)
                                         ? oceanColor((seaLevel - h) / oceanDepth)

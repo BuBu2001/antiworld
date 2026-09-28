@@ -62,16 +62,51 @@ float Heightmap::heightAt(std::uint32_t x, std::uint32_t z) const {
 }
 
 float TerrainGenerator::sampleHeightAt(const Config& config, std::uint32_t seed,
-                                      double wx, double wz) {
+                                      double wx, double wz, double wrapX) {
     const GeographyConfig& geo = config.geography;
     PerlinNoise relief(seed);
     PerlinNoise continents(seed ^ 0x5DEECE66Du);
 
+    // Протяжённость, по которой замыкается мир. Карта передаёт свой extent
+    // (wrapX), 3D-мир берёт extent из конфига. Если они равны — а они равны
+    // по умолчанию — то карта и мир считают ОДНО И ТО ЖЕ поле шума побитово.
+    // Если разойдутся, карта начнёт показывать рельеф, которого нет.
+    const double span = wrapX > 0.0 ? wrapX : config.worldExtent;
+
+    // Период в ЦЕЛЫХ ячейках решётки. llround, а не усечение: с усечением
+    // период был бы на ячейку короче и шов сместился бы на целую ячейку
+    // рельефа (~200 м на октаву базовой частоты).
+    const auto periodCells = [span](double scale) -> std::int64_t {
+        if (span <= 0.0) {
+            return 0;
+        }
+        const double cells = span * scale;
+        const std::int64_t rounded = static_cast<std::int64_t>(std::llround(cells));
+        return rounded > 0 ? rounded : 0;
+    };
+    const std::int64_t reliefPeriod = periodCells(config.scale);
+    const std::int64_t continentPeriod = periodCells(geo.continentScale);
+
+    // Частоты берутся ИЗ КОНФИГА, а не подгоняются под период. Подгонка
+    // (scale = periodCells/wrapX) формально снимала бы остаток периода, но
+    // карта и 3D-мир считали бы тогда РАЗНОЕ поле шума: игрок, идя к материку
+    // с карты, пришёл бы в океан. Поэтому частоты в конфиге обязаны быть целым
+    // числом ячеек на wrapX — это проверяет конструктор WorldMap.
+
     // Детальный рельеф (fBm) в [-1, 1]. Координаты в double: при глобальных
     // 2.26e7 м float32 давал бы шаг ~2 м, то есть рельеф превращался бы в
     // лестницу из плато.
-    const float fbm = relief.fbm2D(wx * config.scale, wz * config.scale, config.octaves,
-                                   config.lacunarity, config.gain);
+    // Координата X считается как (x/extent) * periodCells, а НЕ как x*scale.
+    // Обе формы дают одно поле шума (разница — последний бит double), но
+    // только первая даёт РОВНЫЙ шов: на краю wx = ±extent/2 получается ровно
+    // ±periodCells/2, и при чётном periodCells это целое число, а значит
+    // дробные части решётки с двух сторон совпадают побитово. При x*scale тот
+    // же край давал 564.5 с точностью до 1e-5 ячейки, и высота скакала.
+    const double coordX =
+        reliefPeriod > 0 ? (wx / span) * static_cast<double>(reliefPeriod)
+                         : wx * config.scale;
+    const float fbm = relief.fbm2D(coordX, wz * config.scale, config.octaves,
+                                   config.lacunarity, config.gain, reliefPeriod);
     const double detail = config.baseLevel + static_cast<double>(config.amplitude) * fbm;
 
     if (!geo.enabled) {
@@ -83,8 +118,12 @@ float TerrainGenerator::sampleHeightAt(const Config& config, std::uint32_t seed,
     // из-за чего каждый чанк был одинаково «океаническим» (материков не
     // существовало) и берег рвался на границах.
     const double coastBias = static_cast<double>(geo.coastBias);
-    const double mask = continents.fbm2D(wx * geo.continentScale, wz * geo.continentScale,
-                                         3, 2.0f, 0.5f);
+    // Маска нормализуется так же, как рельеф: (x/extent) * continentPeriod.
+    const double coordXContinent =
+        continentPeriod > 0 ? (wx / span) * static_cast<double>(continentPeriod)
+                            : wx * geo.continentScale;
+    const double mask = continents.fbm2D(coordXContinent, wz * geo.continentScale,
+                                         3, 2.0f, 0.5f, continentPeriod);
     const double sharp = 1.0 / static_cast<double>(std::max(0.05f, geo.coastSharpness));
 
     if (mask >= coastBias) {

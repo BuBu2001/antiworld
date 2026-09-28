@@ -83,14 +83,28 @@ float PerlinNoise::noise2D(float x, float y) const {
 }
 
 float PerlinNoise::noise2D(double x, double y) const {
+    return noise2D(x, y, /*periodX=*/0);
+}
+
+float PerlinNoise::noise2D(double x, double y, std::int64_t periodX) const {
     if (!std::isfinite(x) || !std::isfinite(y)) {
         return 0.0f;
     }
 
     const double cellX = std::floor(x);
     const double cellY = std::floor(y);
-    const std::int64_t ix = static_cast<std::int64_t>(cellX);
+    std::int64_t ix = static_cast<std::int64_t>(cellX);
     const std::int64_t iy = static_cast<std::int64_t>(cellY);
+    // Периодичность: индекс ячейки по X приводится по модулю периода. Важно,
+    // что СМЕЩЕНИЕ внутри ячейки (dx) берётся из исходного, не свёрнутого
+    // floor: тогда в точке ровно на шве dx тот же, что и на противоположном
+    // краю, и решётка смыкается без разрыва.
+    if (periodX > 0) {
+        ix = wrapCell(ix, periodX);
+    }
+    // Соседняя ячейка по X тоже сворачивается: на последней ячейке периода её
+    // индекс должен стать нулём, иначе шов останется разрывом в одну ячейку.
+    const std::int64_t ix1 = periodX > 0 ? wrapCell(ix + 1, periodX) : ix + 1;
     // Смещение точки внутри ячейки: [0, 1) по каждой оси.
     const double dx = x - cellX;
     const double dy = y - cellY;
@@ -101,9 +115,9 @@ float PerlinNoise::noise2D(double x, double y) const {
     // непериодическим 64-битным хешем, поэтому поле не повторяется на дистанции
     // в десятки тысяч километров (у таблицы на 256 ячеек период 256 ячеек).
     const double n00 = gradient2D(hashCell(ix, iy), dx, dy);
-    const double n10 = gradient2D(hashCell(ix + 1, iy), dx - 1.0, dy);
+    const double n10 = gradient2D(hashCell(ix1, iy), dx - 1.0, dy);
     const double n01 = gradient2D(hashCell(ix, iy + 1), dx, dy - 1.0);
-    const double n11 = gradient2D(hashCell(ix + 1, iy + 1), dx - 1.0, dy - 1.0);
+    const double n11 = gradient2D(hashCell(ix1, iy + 1), dx - 1.0, dy - 1.0);
 
     // Билинейная интерполяция с квинтическим сглаживанием по каждой оси.
     return static_cast<float>(kNormalize2D * lerpD(lerpD(n00, n10, u), lerpD(n01, n11, u), v));
@@ -151,6 +165,11 @@ float PerlinNoise::fbm2D(float x, float y, int octaves, float lacunarity,
 
 float PerlinNoise::fbm2D(double x, double y, int octaves, float lacunarity,
                           float gain) const {
+    return fbm2D(x, y, octaves, lacunarity, gain, /*periodX=*/0);
+}
+
+float PerlinNoise::fbm2D(double x, double y, int octaves, float lacunarity,
+                          float gain, std::int64_t periodX) const {
     if (octaves <= 0 || !std::isfinite(lacunarity) || !std::isfinite(gain)) {
         return 0.0f;
     }
@@ -163,7 +182,17 @@ float PerlinNoise::fbm2D(double x, double y, int octaves, float lacunarity,
     double amplitudeSum = 0.0;
 
     for (int octave = 0; octave < octaves; ++octave) {
-        sum += amplitude * noise2D(x * frequency, y * frequency);
+        // Период в ячейках ВХОДНЫХ координат растёт вместе с частотой октавы.
+        // Поэтому период в метрах (periodX/frequency_cell) у всех октав
+        // одинаковый, и смыкается не только базовая октава, но и весь рельеф.
+        // llround, а не static_cast: periodX*frequency — double, и при
+        // lacunarity 2.0 произведение целое только если periodX целое.
+        const std::int64_t period =
+            periodX > 0 ? static_cast<std::int64_t>(
+                              std::llround(static_cast<double>(periodX) * frequency))
+                        : 0;
+        sum += amplitude * (period > 0 ? noise2D(x * frequency, y * frequency, period)
+                                       : noise2D(x * frequency, y * frequency));
         amplitudeSum += amplitude;
         frequency *= lacunarity;
         amplitude *= gain;
