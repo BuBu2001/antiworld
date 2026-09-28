@@ -38,16 +38,24 @@ float hash13(vec3 p) {
 }
 
 // UV равнопромежуточной карты для точки сферы. Полюс — +Z.
+//
+// atan(n.y, n.x), а НЕ atan(n.x, n.y): порядок осей задаёт, зеркальна ли
+// карта. С atan(x,y) базис (восток, север, наружу) имеет det = -1, и
+// материк смотрится зеркально — игрок, идущий на восток (+X), уезжал бы
+// по карте на запад. Круговая проверка sphereUV(uvToDir(uv)) == uv такой
+// баг не находит: она инвариантна к перестановке x/y.
 vec2 sphereUV(vec3 n) {
-    return vec2(0.5 + atan(n.x, n.y) / (2.0 * PI),
+    return vec2(0.5 + atan(n.y, n.x) / (2.0 * PI),
                 0.5 + asin(clamp(n.z, -1.0, 1.0)) / PI);
 }
 
 // Направление на сфере, соответствующее UV карты (обратное к sphereUV).
+// Порядок sin/cos здесь обязан совпадать с atan(y,x) в sphereUV: иначе
+// карта зеркалится относительно своего же кругового теста.
 vec3 uvToDir(vec2 uv) {
     const float lon = 2.0 * PI * (uv.x - 0.5);
     const float lat = PI * (uv.y - 0.5);
-    return vec3(cos(lat) * sin(lon), cos(lat) * cos(lon), sin(lat));
+    return vec3(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat));
 }
 
 void main() {
@@ -62,10 +70,18 @@ void main() {
                                     ndc.y * tanHalfFov, -1.0));
 
     const bool hasPlayer = ubo.player.w > 0.5;
-    const vec3 f = uvToDir(ubo.player.xy);
+    // Направление на САМОГО игрока — это цель маркера, он не двигается при
+    // вращении глобуса.
+    const vec3 fPlayer = uvToDir(ubo.player.xy);
+    // Точка, вставленная в ЦЕНТР диска: игрок + смещение от вращения мышью.
+    // Так глобус доводится в любую сторону, а игрок уезжает по диску (и на
+    // дальнюю полусферу, если довернуть сильно — как на настоящей модели).
+    const vec2 centerUv = vec2(fract(ubo.player.x + ubo.params.z / (2.0 * PI)),
+                               clamp(ubo.player.y + ubo.params.w / PI, 0.002, 0.998));
+    const vec3 f = uvToDir(centerUv);
 
-    // Базис с осью, направленной на игрока. Ось наклонена, иначе полюс карты
-    // совпал бы с осью обзора и мы бы видели только шапку выше 19° с.ш.
+    // Базис с осью, направленной в центр диска. Ось наклонена, иначе полюс
+    // карты совпал бы с осью обзора и мы бы видели только шапку выше 19° с.ш.
     const vec3 axis = normalize(vec3(0.0, 0.62, 0.78));
     vec3 e1 = cross(axis, f);
     if (dot(e1, e1) < 1e-8) {
@@ -117,11 +133,12 @@ void main() {
         color += vec3(0.28, 0.48, 0.95) * rim * day * 0.55;
 
         if (hasPlayer) {
-            // Маркер там, где q == f, то есть ровно в центре диска. Радиус
-            // задан в «единицах сферы», поэтому не зависит ни от FOV, ни от
-            // разрешения окна.
+            // Маркер там, где q == fPlayer. При нулевом смещении это ровно
+            // центр диска; при повороте глобуса он едет по диску вместе с
+            // игроком. Радиус задан в «единицах сферы», поэтому не зависит ни
+            // от FOV, ни от разрешения окна.
             const float pulse = 0.5 + 0.5 * sin(ubo.params.y * 3.0);
-            const float d = length(q - f);
+            const float d = length(q - fPlayer);
             const float dot_ = smoothstep(0.016, 0.006, d);
             const float ring = smoothstep(0.052, 0.038, d) * smoothstep(0.026, 0.032, d);
             color = mix(color, vec3(1.0, 0.30, 0.20), dot_ * 0.9);

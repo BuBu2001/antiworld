@@ -189,6 +189,11 @@ int main() {
         const auto startTime = std::chrono::steady_clock::now();
         world::WorldMap worldMap(chunkConfig.terrain, chunkConfig.seed);
         bool mapOpen = false;
+        // Смещение обзора планеты относительно игрока (радианы). Маркер игрока
+        // при этом не уезжает с карты: смещается только точка, вставленная в
+        // центр диска, поэтому глобус доводится мышью в любую сторону.
+        float mapSpinLon = 0.0f;
+        float mapSpinLat = 0.0f;
         bool mapTextureUploaded = false;
         worldMap.start();
         // Предыдущая локальная позиция тела: по разнице с текущей считается
@@ -328,6 +333,8 @@ int main() {
                                            static_cast<float>(height)
                                      : 1.0f;
 
+            // На карте ЛКМ крутит планету, а не камеру.
+            camera.setLookEnabled(!mapOpen);
             camera.update(dt, aspect);
 
             // === Стриминг мира ===
@@ -520,10 +527,31 @@ int main() {
                                                            tCull0)
                     .count();
             if (mapOpen) {
+                // === Вращение планеты зажатой ЛКМ ===
+                // Камера на карте не крутится (camera.setLookEnabled(false)),
+                // но её дельта курсора всё равно снята в этом кадре и лежит в
+                // lastMouseDelta(), поэтому берём её здесь и крутим глобус.
+                // Тянуть вправо -> поверхность едет вправо -> в центре диска
+                // встаёт точка ЗАПАДНЕЕ игрока, поэтому долгота уменьшается.
+                // Тянуть вниз (dY>0, Y вниз) -> поверхность едет вниз -> в
+                // центре точка СЕВЕРНЕЕ игрока, поэтому широта растёт.
+                if (core::Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
+                    const glm::vec2 d = camera.lastMouseDelta();
+                    // Весь экран по ширине ~= 1600 px -> примерно полный оборот.
+                    const float k = kTwoPi / 1600.0f;  // ширина экрана ~= полный оборот
+                    mapSpinLon -= d.x * k;
+                    mapSpinLat = std::clamp(mapSpinLat + d.y * k,
+                                            -1.5533f, 1.5533f);  // ±89°
+                    // Долготу держим в [-pi, pi], иначе за сутки игры угол
+                    // накапливает тысячи радиан и теряет точность float.
+                    mapSpinLon = std::remainder(mapSpinLon, kTwoPi);
+                }
                 // Карта заменяет 3D-кадр: сцена не рисуется, но мир продолжает
                 // жить (стриминг, физика), поэтому маркер едет за игроком.
                 renderer::MapUniformObject mapUniform{};
                 mapUniform.player = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+                mapUniform.params.z = mapSpinLon;
+                mapUniform.params.w = mapSpinLat;
                 // Время — только для пульсации маркера на сфере.
                 mapUniform.params.y = static_cast<float>(
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime)

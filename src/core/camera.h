@@ -78,6 +78,18 @@ public:
 
     // Настройки (меняются между кадрами).
     void setSensitivity(float radiansPerPixel) { sensitivity_ = radiansPerPixel; }
+
+    // Обзор мышью можно выключить (на экране карты ЛКМ крутит планету).
+    // Важно: дельта курсора снимается ВСЁ РАВНО каждый кадр, иначе база
+    // lastMouseX_ устареет и при возврате в игру камеру рванёт на сотни
+    // пикселей. Поэтому флаг влияет только на изменение yaw/pitch.
+    void setLookEnabled(bool enabled) { lookEnabled_ = enabled; }
+    bool lookEnabled() const { return lookEnabled_; }
+
+    // Дельта курсора, снятая в последнем update(). Нужна тем, кто в этом кадре
+    // крутит не камеру, а планету: Input::mouseDeltaX/Y() можно вызвать только
+    // ОДИН раз за кадр, кто первый — тот и получил дельту.
+    glm::vec2 lastMouseDelta() const { return lastMouseDelta_; }
     void setFovDegrees(float fovDegrees) { fov_ = glm::radians(fovDegrees); }
 
     // Текущие углы и направление взгляда. Нужны для телеметрии и отладки:
@@ -126,6 +138,8 @@ private:
     // Чувствительность мыши (рад/пиксель), скорость движения (м/с),
     // поле зрения (радианы) — настраиваются через set*().
     float sensitivity_{0.002f};
+    bool lookEnabled_{true};
+    glm::vec2 lastMouseDelta_{0.0f};
     float fov_{glm::radians(60.0f)};
 
     // Плоскости отсечения (см. setClipPlanes).
@@ -195,8 +209,9 @@ inline void Camera::update(float dt, float aspect) {
     // прилетает ОДНИМ рывком: камера прыгает/прыгает на исходный обзор.
     const double dX = Input::mouseDeltaX();
     const double dY = Input::mouseDeltaY();
+    lastMouseDelta_ = glm::vec2(static_cast<float>(dX), static_cast<float>(dY));
 
-    if (Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
+    if (lookEnabled_ && Input::isMouseButtonPressed(GLFW_MOUSE_BUTTON_LEFT)) {
         yaw_ += static_cast<float>(dX) * sensitivity_;
         pitch_ -= static_cast<float>(dY) * sensitivity_;  // Y вверх — pitch вниз
 
