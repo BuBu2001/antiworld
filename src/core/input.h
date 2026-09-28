@@ -29,6 +29,18 @@ public:
     static double mouseDeltaX();
     static double mouseDeltaY();
 
+    // ФРОНТ НАЖАТИЯ, а не состояние: true ровно один раз на нажатие.
+    //
+    // Для тумблеров (карта, пауза) опрос isKeyPressed() не годится: он истинно
+    // всё время, пока клавиша зажата, а «залипание» не наступившего отпускания
+    // (потерянное событие, перехват фокуса) навсегда блокирует переключение.
+    // Здесь флаг ставится из key callback'а GLFW, поэтому нажатие не теряется
+    // и не зависит от того, в каком кадре пришло событие.
+    static bool consumeKeyPress(int key);
+
+    // Вызывается из key callback'а окна (см. Window::initCallbacks).
+    static void onKeyPress(int key);
+
     // Накопленное смещение колеса прокрутки. Возвращает true, если прокрутка
     // была с момента прошлого вызова, и забирает накопленное значение.
     static bool consumeScroll(double& x, double& y);
@@ -44,6 +56,9 @@ private:
     static inline double lastMouseY_ = 0.0;
     static inline double scrollX_ = 0.0;
     static inline double scrollY_ = 0.0;
+    // Очередь нажатий. Размер 512 с запасом перекрывает GLFW_KEY_LAST (348).
+    static constexpr int kMaxKeyCode = 512;
+    static inline bool keyPressPending_[kMaxKeyCode] = {};
 };
 
 // --- Реализация (inline, header-only) ---
@@ -95,6 +110,20 @@ inline double Input::mouseDeltaY() {
     // Симметрично mouseDeltaX(): база по Y обновляется только здесь.
     lastMouseY_ = y;
     return delta;
+}
+
+inline void Input::onKeyPress(int key) {
+    if (key >= 0 && key < kMaxKeyCode) {
+        keyPressPending_[key] = true;
+    }
+}
+
+inline bool Input::consumeKeyPress(int key) {
+    if (key < 0 || key >= kMaxKeyCode || !keyPressPending_[key]) {
+        return false;
+    }
+    keyPressPending_[key] = false;
+    return true;
 }
 
 inline bool Input::consumeScroll(double& x, double& y) {

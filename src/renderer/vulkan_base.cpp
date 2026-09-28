@@ -446,7 +446,16 @@ void VulkanBase::drawWorldMap(const MapUniformObject& uniform) {
 
     VkCommandBuffer commandBuffer = commandBuffers_.commandBuffer(currentFrame_);
     vkResetCommandBuffer(commandBuffer, 0);
-    worldMapPass_.update(currentFrame_, uniform);
+    // Аспект берём из swapchain здесь, а не в main: окно может измениться
+    // между кадрами, и единственное достоверное место знать текущий extent —
+    // сам renderer.
+    MapUniformObject withAspect = uniform;
+    const float aspect = swapChainExtent_.height > 0
+                             ? static_cast<float>(swapChainExtent_.width) /
+                                   static_cast<float>(swapChainExtent_.height)
+                             : 1.0f;
+    withAspect.params.x = aspect;
+    worldMapPass_.update(currentFrame_, withAspect);
 
     // Список объектов пустой: карта рисуется одним полноэкранным треугольником
     // в шейдере, 3D-сцена в этом кадре не выводится. Цвет очистки — тёмно-синий,

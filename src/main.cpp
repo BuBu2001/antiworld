@@ -186,9 +186,9 @@ int main() {
         // каждый — две суммы fBm, это ~2-3 с. Пока считается, игра живёт как
         // обычно, а M просто ничего не делает. Пиксели загружаются в текстуру
         // ОДИН раз, когда генерация закончилась.
+        const auto startTime = std::chrono::steady_clock::now();
         world::WorldMap worldMap(chunkConfig.terrain, chunkConfig.seed);
         bool mapOpen = false;
-        bool mapKeyWasDown = false;
         bool mapTextureUploaded = false;
         worldMap.start();
         // Предыдущая локальная позиция тела: по разнице с текущей считается
@@ -293,19 +293,17 @@ int main() {
                 break;
             }
 
-            // M — карта мира. Переключение ПО ФРОНТУ нажатия, а не по
-            // удержанию: isKeyPressed() истинно всё время, пока клавиша
-            // зажата, и карта мигала бы открытой/закрытой каждый кадр.
-            const bool mapKeyDown = core::Input::isKeyPressed(GLFW_KEY_M);
-            if (mapKeyDown && !mapKeyWasDown) {
+            // M — карта мира. Фронт нажатия из key callback'а, а не опрос
+            // isKeyPressed(): удержание M мигало бы картой каждый кадр.
+            if (core::Input::consumeKeyPress(GLFW_KEY_M)) {
                 if (vulkan.worldMapReady()) {
                     mapOpen = !mapOpen;
-                    core::Logger::info(mapOpen ? "Карта мира: открыта" : "Карта мира: закрыта");
+                    core::Logger::info(mapOpen ? "Карта мира: открыта"
+                                               : "Карта мира: закрыта");
                 } else {
                     core::Logger::info("Карта мира: ещё считается, нажми M позже");
                 }
             }
-            mapKeyWasDown = mapKeyDown;
 
             // Текстура карты загружается один раз — 32 МБ пикселей переливать
             // каждый кадр незачем.
@@ -525,14 +523,18 @@ int main() {
                 // Карта заменяет 3D-кадр: сцена не рисуется, но мир продолжает
                 // жить (стриминг, физика), поэтому маркер едет за игроком.
                 renderer::MapUniformObject mapUniform{};
-                mapUniform.player = glm::vec4(0.0f, 0.0f, 0.0035f, 0.0f);
+                mapUniform.player = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+                // Время — только для пульсации маркера на сфере.
+                mapUniform.params.y = static_cast<float>(
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - startTime)
+                        .count());
                 if (playerEntity != entt::null) {
                     const auto& tr =
                         world.registry().get<const ecs::Transform>(playerEntity);
                     const glm::vec2 uv = worldMap.uvOf(
                         static_cast<double>(tr.position.x) + chunks.origin().x,
                         static_cast<double>(tr.position.z) + chunks.origin().z);
-                    mapUniform.player = glm::vec4(uv.x, uv.y, 0.0035f, 1.0f);
+                    mapUniform.player = glm::vec4(uv.x, uv.y, 0.0f, 1.0f);
                 }
                 vulkan.drawWorldMap(mapUniform);
             } else {

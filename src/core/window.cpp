@@ -102,6 +102,14 @@ void Window::initCallbacks() {
     glfwSetWindowUserPointer(window_, this);
 
     glfwSetFramebufferSizeCallback(window_, &Window::framebufferResizeCallback);
+    // Клавиши: окно интересует только ФРОНТ нажатия (GLFW_PRESS), он же
+    // гасит автоповтор. Состояние «зажата сейчас» по-прежнему доступно через
+    // Input::isKeyPressed() (GLFW опрашивает его самостоятельно).
+    glfwSetKeyCallback(window_, [](GLFWwindow*, int key, int, int action, int) {
+        if (action == GLFW_PRESS) {
+            Input::onKeyPress(key);
+        }
+    });
     // Прокрутка колеса не нужна окну — передаём состояние системе ввода.
     glfwSetScrollCallback(window_, [](GLFWwindow*, double xoffset, double yoffset) {
         Input::onScroll(xoffset, yoffset);
