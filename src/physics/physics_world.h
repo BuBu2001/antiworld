@@ -44,6 +44,28 @@ public:
         const glm::quat& rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
     );
 
+    // Капсула-игрок: halfHeight — половина ВЫСОТЫ ЦИЛИНДРА (без двух
+    // полусферий), radius — радиус полусфер. Полная высота =
+    // 2 * (halfHeight + radius). Форма выбрана capsule, а не box/sphere,
+    // потому что она не «застревает» на стыках треугольников рельефа.
+    BodyHandle createDynamicCapsule(
+        float halfHeight,
+        float radius,
+        const glm::vec3& position,
+        const glm::quat& rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
+    );
+
+    // Луч вниз для проверки опоры под персонажем. Возвращает true, если луч
+    // что-то задел; в outDistance — расстояние до точки попадания, в
+    // outNormal — нормаль поверхности в этой точке (нужна, чтобы отличать
+    // «стоим на земле» от «висим на стене»).
+    bool raycastDown(
+        const glm::vec3& from,
+        const glm::vec3& to,
+        float& outDistance,
+        glm::vec3& outNormal
+    ) const;
+
     // Статическое тело с произвольной формой Jolt: высотное поле
     // (TerrainGenerator::createPhysicsBody), mesh и тому подобное. Форму
     // достаточно передать по ссылке — Jolt держит собственную ссылку на неё
@@ -78,6 +100,9 @@ private:
     struct Impl;
 
     std::unique_ptr<Impl> impl_;
+    // Тело игрока: луч проверки опоры не должен цеплять его снизу, иначе
+    // «стою на земле» было бы истинно всегда. Ставится в createDynamicCapsule.
+    BodyHandle playerBody_{};
 };
 
 }

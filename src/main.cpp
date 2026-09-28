@@ -17,6 +17,7 @@
 #include "ecs/components.h"
 #include "ecs/world.h"
 #include "physics/physics_system.h"
+#include "physics/player_controller.h"
 #include "physics/physics_world.h"
 #include "renderer/instanced_renderer.h"
 #include "renderer/model_loader.h"
@@ -70,11 +71,11 @@ int main() {
         // дальние чанки срезаются. near=1/far=20000 даёт приемлемую
         // точность глубины для 24-битного буфера.
         camera.setClipPlanes(1.0f, 20000.0f);
-        camera.setSpeed(120.0f);
 
         ecs::World world(camera, vulkan);
         physics::PhysicsWorld physicsWorld;
         physics::PhysicsSystem physicsSystem(physicsWorld);
+        physics::PlayerController playerController;
 
         // Климат мира: время года, сезон, температура и влажность.
         world::Climate climate;
@@ -120,6 +121,13 @@ int main() {
         std::vector<renderer::DrawData> instancedDraws;
 
 
+        // Габариты игрока. Jolt-капсула: halfHeight — половина цилиндра,
+        // поэтому полная высота = 2 * (halfHeight + radius) = kPlayerHeight.
+        constexpr float kPlayerRadius = 0.35f;
+        constexpr float kPlayerHeight = 1.8f;
+        // Глаза: чуть ниже макушки, как у человека.
+        constexpr float kPlayerEyeHeight = 1.62f;
+
         constexpr std::size_t kAgentCount = 100;
         constexpr std::size_t kGridWidth = 10;
         constexpr float kGridSpacing = 8.0f;
@@ -164,6 +172,65 @@ int main() {
             }
         };
         bool agentsSpawned = false;
+
+        // Сущность игрока. Пуста (entt::null), пока суша не найдена.
+        entt::entity playerEntity = entt::null;
+
+        // Сдвиг floating origin обрабатывает ChunkManager для ЧАНКОВ, но тела,
+        // созданные вне чанков (игрок, агенты), о нём не знают: их локальные
+        // координаты остались бы от старого origin, и после сдвига они уехали
+        // бы на километры вместе со «сдвинутой» землёй. Здесь ловим изменение
+        // origin и переносим все такие тела тем же сдвигом.
+        awdm::dvec3 lastOrigin = chunks.origin();
+        const auto rebaseDynamicBodies = [&]() {
+            const awdm::dvec3 origin = chunks.origin();
+            if (origin == lastOrigin) {
+                return;
+            }
+            const glm::vec3 delta = glm::vec3(
+                static_cast<float>(origin.x - lastOrigin.x),
+                static_cast<float>(origin.y - lastOrigin.y),
+                static_cast<float>(origin.z - lastOrigin.z));
+            // Только игрок и агенты: тела чанков ChunkManager пересчитал сам.
+            const auto shift = [&](const entt::entity e) {
+                auto& transform = world.registry().get<ecs::Transform>(e);
+                const auto& body = world.registry().get<ecs::RigidBody>(e);
+                transform.position -= delta;
+                if (physicsWorld.isBodyValid(body.handle)) {
+                    physicsWorld.setBodyTransform(
+                        body.handle, transform.position,
+                        glm::quat(1.0f, 0.0f, 0.0f, 0.0f));
+                }
+            };
+            for (const entt::entity e :
+                 world.registry().view<ecs::Transform, ecs::RigidBody, ecs::Player>()) {
+                shift(e);
+            }
+            for (const entt::entity e :
+                 world.registry().view<ecs::Transform, ecs::RigidBody, ecs::Agent>()) {
+                shift(e);
+            }
+            lastOrigin = origin;
+        };
+
+        // Камера следует за телом игрока, а не летает сама. Точка наблюдения —
+        // на высоте глаз; ориентацию (yaw/pitch) задаёт мышь в camera.update().
+        const auto cameraFollowsPlayer = [&]() {
+            if (playerEntity == entt::null) {
+                return;
+            }
+            const auto view = world.registry().view<const ecs::Transform, const ecs::Player>();
+            for (const entt::entity e : view) {
+                const auto& transform = world.registry().get<const ecs::Transform>(e);
+                const double gx = static_cast<double>(transform.position.x) + chunks.origin().x;
+                const double gz = static_cast<double>(transform.position.z) + chunks.origin().z;
+                // Смещение от центра капсулы к глазам.
+                const double gy = static_cast<double>(transform.position.y) +
+                                  (kPlayerEyeHeight - 0.5 * kPlayerHeight);
+                camera.setGlobalPosition(glm::dvec3(gx, gy, gz));
+                break;
+            }
+        };
 
         // Все чанки, которые накроет сетка агентов, должны быть загружены:
         // иначе часть тел окажется в воздухе без коллайдера. Сетка симметрична
@@ -266,16 +333,43 @@ int main() {
                     }
                 }
                 if (found) {
-                    // Камера — на 60 м над сушей, взгляд горизонтально (иначе W
-                    // уводит вниз, в рельеф).
-                    const glm::dvec3 eye{spawnX, ground + 60.0, spawnZ};
-                    camera.init(eye, glm::dvec3(spawnX, ground + 60.0, spawnZ - 400.0));
-                    // Сразу подстраиваем origin под новую позицию, чтобы в
-                    // этом же кадре стриминг подгрузил чанки МЕСТА спавна, а не
-                    // места старта.
+                    // Сразу подстраиваем origin под точку спавна, чтобы в этом
+                    // же кадре стриминг подгрузил чанки МЕСТА спавна, а не
+                    // места старта. Локальные координаты тела считаем уже от
+                    // нового origin, иначе капсула уехала бы на десятки км.
                     chunks.teleportOrigin(awdm::dvec3(spawnX, 0.0, spawnZ));
                     camera.setOrigin(glm::dvec3(chunks.origin().x, chunks.origin().y,
                                                  chunks.origin().z));
+
+                    // --- Физическое тело игрока: капсула ногами на земле. ---
+                    // Jolt ждёт halfHeight цилиндра, поэтому вычитаем два
+                    // радиуса: полная высота капсулы = kPlayerHeight.
+                    const float halfHeight = 0.5f * kPlayerHeight - kPlayerRadius;
+                    const glm::vec3 bodyCenter{
+                        static_cast<float>(spawnX - chunks.origin().x),
+                        static_cast<float>(ground + 0.5 * kPlayerHeight + 0.05),
+                        static_cast<float>(spawnZ - chunks.origin().z)};
+                    playerEntity = world.createEntity();
+                    world.registry().emplace<ecs::Transform>(
+                        playerEntity, ecs::Transform{bodyCenter, {}, {1.0f, 1.0f, 1.0f}});
+                    // Тело НЕ рисуем: камера стоит на высоте глаз (1.62 м) внутри
+                    // капсулы высотой 1.8 м, и собственный меш закрывал бы весь
+                    // обзор изнутри. В шутерах от первого лица тело не видно.
+                    // Физика (ecs::RigidBody) при этом полноценная.
+                    world.registry().emplace<ecs::RigidBody>(
+                        playerEntity,
+                        ecs::RigidBody{physicsWorld.createDynamicCapsule(
+                            halfHeight, kPlayerRadius, bodyCenter)});
+                    ecs::Player playerParams{};
+                    playerParams.radius = kPlayerRadius;
+                    playerParams.height = kPlayerHeight;
+                    world.registry().emplace<ecs::Player>(playerEntity, playerParams);
+
+                    // Камера — на высоте глаз, взгляд горизонтально (иначе W
+                    // уводит в рельеф).
+                    const double eyeY = ground + kPlayerEyeHeight;
+                    camera.init(glm::dvec3(spawnX, eyeY, spawnZ),
+                                 glm::dvec3(spawnX, eyeY, spawnZ - 400.0));
                     // Агенты — рядом с игроком, иначе коллайдеров под ними нет.
                     // Но сетка 10×10 с шагом 8 м (размах 72 м) может вылезти за
                     // границу чанка, и тогда часть тел окажется над соседним,
@@ -299,8 +393,20 @@ int main() {
                 }
             }
 
+            // Порядок ниже критичен для тел, живущих вне чанков:
+            //   1) ChunkManager сдвигает origin для чанков,
+            //   2) rebaseDynamicBodies переносит игрока и агентов тем же сдвигом,
+            //   3) контроллер задаёт скорость, Jolt делает шаг,
+            //   4) камера встаёт на позицию тела.
+            rebaseDynamicBodies();
+
             world.update(dt);
+            // Контроллер ЗАДАЁТ скорость тела, потом идёт шаг симуляции, потом
+            // позиция тела возвращается в ECS. Камера ведётся от тела — то есть
+            // игрок стоит на рельефе под гравитацией, а не висит в воздухе.
+            playerController.update(world.registry(), physicsWorld, dt, camera.yaw());
             physicsSystem.update(world.registry(), dt);
+            cameraFollowsPlayer();
             // Свет и морозность сезона — в UBO этого кадра. Раньше это делал
             // world::Terrain::environment(); с переходом на чанковый мир
             // FrameEnvironment собирается прямо из климата, а уровень моря
@@ -357,6 +463,22 @@ int main() {
             // Проверка физики: агенты должны стоять на рельефе, то есть
             // y = высота меша + полуразмер тела. Считаем отклонение, а не
             // абсолютную Y: так видно и «висит в воздухе», и «провалился».
+            // Насколько низ тела игрока относительно нарисованного рельефа.
+            // Ноль = стоит на земле, большое отрицательное = провалился сквозь.
+            double playerAboveTerrain = 0.0;
+            for (const entt::entity e :
+                 world.registry().view<const ecs::Transform, const ecs::Player>()) {
+                const auto& tr = world.registry().get<const ecs::Transform>(e);
+                const double h = chunks.heightAtGlobal(
+                    static_cast<double>(tr.position.x) + chunks.origin().x,
+                    static_cast<double>(tr.position.z) + chunks.origin().z);
+                if (std::isfinite(h)) {
+                    playerAboveTerrain = static_cast<double>(tr.position.y) -
+                                         0.5 * kPlayerHeight - h;
+                }
+                break;
+            }
+
             double agentRestError = 0.0;
             {
                 std::size_t n = 0;
@@ -402,7 +524,12 @@ int main() {
                         std::to_string(treeCull.total) + " (" +
                         std::to_string(treeCull.drawCalls) + " instanced draw call) cull=" +
                         std::to_string(cullMs) + "мс cpuFrame=" + std::to_string(frameCpuMs) +
-                        "мс | агенты на рельефе: отклонение=" + std::to_string(agentRestError) + " м" +
+                        "мс | ИГРОК: " + (playerController.state().grounded ? "на земле" : "в воздухе") +
+                        " v=" + std::to_string(playerController.state().horizontalSpeed) +
+                        "м/с" + (playerController.state().running ? " бег" : " шаг") +
+                        " y-рельеф=" + std::to_string(playerAboveTerrain) + "м" +
+                        " | агенты на рельефе: отклонение=" +
+                        std::to_string(agentRestError) + " м" +
                         " yaw=" + std::to_string(camera.yaw() * 57.2958f) + "°" +
                         " pitch=" + std::to_string(camera.pitch() * 57.2958f) + "°" +
                         " | стриминг: " + chunks.debugLine());

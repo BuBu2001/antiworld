@@ -14,7 +14,17 @@
 #include <Jolt/Geometry/Plane.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/MotionQuality.h>
+#include <Jolt/Physics/Body/Body.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Body/BodyLock.h>
+#include <Jolt/Physics/Body/MotionProperties.h>
+#include <Jolt/Physics/Collision/BroadPhase/BroadPhaseLayer.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
+#include <Jolt/Physics/Collision/ObjectLayer.h>
+#include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -329,6 +339,82 @@ PhysicsWorld::BodyHandle PhysicsWorld::createDynamicBox(
         JPH::EActivation::Activate
     );
 }
+
+physics::PhysicsWorld::BodyHandle PhysicsWorld::createDynamicCapsule(
+    float halfHeight,
+    float radius,
+    const glm::vec3& position,
+    const glm::quat& rotation
+) {
+    if (!std::isfinite(halfHeight) || !std::isfinite(radius) || halfHeight < 0.0f ||
+        radius <= 0.0f || !isFinite(position) || !isFinite(rotation)) {
+        throw std::invalid_argument("PhysicsWorld: invalid dynamic capsule");
+    }
+
+    JPH::Ref<JPH::Shape> shape = new JPH::CapsuleShape(halfHeight, radius);
+    JPH::BodyCreationSettings settings(
+        shape.GetPtr(),
+        toJoltPosition(position),
+        toJoltRotation(rotation),
+        JPH::EMotionType::Dynamic,
+        kMovingObjectLayer
+    );
+    settings.mFriction = 0.2f;   // не «прилипать» к склонам и не скользить
+    settings.mRestitution = 0.0f;
+    settings.mLinearDamping = 0.0f;  // торможение делает контроллер, не демпфер
+    // Только перемещения, без вращений. Иначе капсула на уклоне заваливается
+    // набок и персонаж «плюхается» набок, а вертикальность тела ломает и
+    // проверку опоры, и рендер.
+    settings.mAllowedDOFs = JPH::EAllowedDOFs::TranslationX |
+                            JPH::EAllowedDOFs::TranslationY |
+                            JPH::EAllowedDOFs::TranslationZ;
+    JPH::BodyInterface& bodyInterface = impl_->physicsSystem.GetBodyInterface();
+    const BodyHandle handle =
+        bodyInterface.CreateAndAddBody(settings, JPH::EActivation::Activate);
+    if (handle.IsInvalid()) {
+        throw std::runtime_error("PhysicsWorld: unable to create capsule body");
+    }
+    impl_->bodyHandles.push_back(handle);
+    playerBody_ = handle;
+    return handle;
+}
+
+bool PhysicsWorld::raycastDown(
+    const glm::vec3& from,
+    const glm::vec3& to,
+    float& outDistance,
+    glm::vec3& outNormal
+) const {
+    if (!isFinite(from) || !isFinite(to)) {
+        return false;
+    }
+    JPH::RRayCast ray{toJoltVec3(from), toJoltVec3(to - from)};
+    JPH::RayCastResult result{};
+    // Луч стартует ВНУТРИ капсулы игрока, поэтому собственное тело надо
+    // исключить: иначе он всегда цеплял бы низ капсулы и «опора» была бы
+    // всегда истинной — персонаж считал бы, что стоит на земле в воздухе.
+    JPH::IgnoreSingleBodyFilter bodyFilter(playerBody_);
+    const JPH::DefaultBroadPhaseLayerFilter broadPhaseFilter(
+        impl_->objectVsBroadPhaseLayerFilter, kMovingObjectLayer);
+    const JPH::DefaultObjectLayerFilter objectFilter(
+        impl_->objectLayerPairFilter, kMovingObjectLayer);
+    const bool hit = impl_->physicsSystem.GetNarrowPhaseQuery().CastRay(
+        ray, result, broadPhaseFilter, objectFilter, bodyFilter);
+    if (!hit || result.mBodyID.IsInvalid()) {
+        return false;
+    }
+    outDistance = result.mFraction * glm::length(to - from);
+    // У RayCastResult нет готовой нормали: её считает тело по под-фигуре.
+    const JPH::BodyLockRead lock(impl_->physicsSystem.GetBodyLockInterface(), result.mBodyID);
+    if (!lock.Succeeded()) {
+        return false;
+    }
+    const JPH::Vec3 normal = lock.GetBody().GetWorldSpaceSurfaceNormal(
+        result.mSubShapeID2, ray.GetPointOnRay(result.mFraction));
+    outNormal = glm::vec3(normal.GetX(), normal.GetY(), normal.GetZ());
+    return true;
+}
+
 
 physics::PhysicsWorld::BodyHandle PhysicsWorld::createStaticShape(
     const JPH::Shape& shape, const glm::vec3& position, const glm::quat& rotation

@@ -39,4 +39,18 @@ struct RigidBody {
 
 struct Agent {};
 
+// Игрок. Скорости и радиусы проверки опоры хранятся в компоненте, чтобы
+// контроллер не тащил настройки в глобальные переменные.
+struct Player {
+    float walkSpeed{3.5f};      // м/с, обычный шаг
+    float runSpeed{8.0f};       // м/с, с зажатым Shift
+    float jumpSpeed{6.0f};      // м/с, начальная вертикальная
+    float radius{0.35f};        // радиус капсулы
+    float height{1.8f};         // полная высота капсулы
+    float groundProbe{0.25f};   // на сколько ниже низа капсулы бьём луч
+    float slopeLimitCos{0.7f};  // косинус максимального наклона для опоры
+    bool grounded{false};
+    bool running{false};
+};
+
 }

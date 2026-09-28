@@ -44,9 +44,15 @@ public:
     // Уже в локальных координатах (double) — удобно для небольших миров.
     void init(const glm::vec3& position, const glm::vec3& target);
 
-    // Обновление каждый кадр: движение (WASD+Q/E), обзор (мышь), скорость
-    // (колесо). dt — время кадра (сек), aspect — ширина/высота окна.
+    // Обновление каждый кадр: только обзор мышью и пересчёт матриц.
+    // Позицию камеры задаёт владелец тела игрока через setGlobalPosition() —
+    // камера больше не «летает» сама. dt — время кадра (сек), aspect —
+    // ширина/высота окна.
     void update(float dt, float aspect);
+
+    // Точка наблюдения в ГЛОБАЛЬНЫХ координатах (double). Ставится из тела
+    // игрока каждый кадр; ориентацию (yaw/pitch) не трогает.
+    void setGlobalPosition(const glm::dvec3& globalPosition);
 
     // Матрицы для UBO (Vulkan-ready: перевёрнутая Y-проекция, Z в [0,1]).
     const glm::mat4& view() const { return view_; }
@@ -71,7 +77,6 @@ public:
     void setOrigin(const glm::dvec3& origin);
 
     // Настройки (меняются между кадрами).
-    void setSpeed(float metersPerSecond) { speed_ = metersPerSecond; }
     void setSensitivity(float radiansPerPixel) { sensitivity_ = radiansPerPixel; }
     void setFovDegrees(float fovDegrees) { fov_ = glm::radians(fovDegrees); }
 
@@ -81,7 +86,6 @@ public:
     float pitch() const noexcept { return pitch_; }
     const glm::vec3& front() const noexcept { return front_; }
     const glm::vec3& right() const noexcept { return right_; }
-    float speed() const noexcept { return speed_; }
 
     // Ближняя и дальняя плоскости отсечения. Дальняя по умолчанию (100 ед.)
     // годится для небольших сцен, но ландшафт 255x255 ед. в неё не влезает —
@@ -122,7 +126,6 @@ private:
     // Чувствительность мыши (рад/пиксель), скорость движения (м/с),
     // поле зрения (радианы) — настраиваются через set*().
     float sensitivity_{0.002f};
-    float speed_{5.0f};
     float fov_{glm::radians(60.0f)};
 
     // Плоскости отсечения (см. setClipPlanes).
@@ -158,8 +161,15 @@ inline void Camera::init(const glm::vec3& position, const glm::vec3& target) {
     init(glm::dvec3(position), glm::dvec3(target));
 }
 
-inline void Camera::setOrigin(const glm::dvec3& origin) {
-    origin_ = origin;
+inline void Camera::setGlobalPosition(const glm::dvec3& globalPosition) {
+    globalPosition_ = globalPosition;
+    const glm::dvec3 local = globalPosition_ - origin_;
+    position_ = glm::vec3(static_cast<float>(local.x), static_cast<float>(local.y),
+                          static_cast<float>(local.z));
+    recomputeView();
+}
+
+inline void Camera::setOrigin(const glm::dvec3& origin) {    origin_ = origin;
     // Локальная позиция = глобальная минус origin. Именно она уходит в
     // view-матрицу; разность считается в double и только потом сужается до
     // float, поэтому не теряет точность даже на краю мира.
@@ -195,37 +205,13 @@ inline void Camera::update(float dt, float aspect) {
         pitch_ = std::clamp(pitch_, -maxPitch, maxPitch);
     }
 
-    // === Колесо прокрутки: меняет скорость движения (накопленное в Input) ===
-    double scrollX = 0.0;
-    double scrollY = 0.0;
-    if (Input::consumeScroll(scrollX, scrollY)) {
-        // Вверх — быстрее, вниз — медленнее; скорость держим в разумных пределах.
-        const float factor = (scrollY > 0.0) ? 1.2f : 0.8f;
-        speed_ = std::clamp(speed_ * factor, 0.5f, 50.0f);
-    }
-
-    // === Движение: WASD (горизонталь), Q/E (вверх/вниз) ===
-    const float velocity = speed_ * dt;
-    glm::vec3 move(0.0f);
-    if (Input::isKeyPressed(GLFW_KEY_W)) move += front_;
-    if (Input::isKeyPressed(GLFW_KEY_S)) move -= front_;
-    if (Input::isKeyPressed(GLFW_KEY_D)) move += right_;
-    if (Input::isKeyPressed(GLFW_KEY_A)) move -= right_;
-    if (Input::isKeyPressed(GLFW_KEY_Q)) move -= up_;
-    if (Input::isKeyPressed(GLFW_KEY_E)) move += up_;
-
-    if (move != glm::vec3(0.0f)) {
-        move = glm::normalize(move);
-    }
-    // Накопление позиции — в double. При скорости 40 м/с и dt ~1/60 с шаг
-    // равен 0.67 м, и в double он не теряется после 22 585 км пути.
-    const double vx = static_cast<double>(move.x) * velocity;
-    const double vy = static_cast<double>(move.y) * velocity;
-    const double vz = static_cast<double>(move.z) * velocity;
-    globalPosition_ += glm::dvec3(vx, vy, vz);
-    position_ = glm::vec3(static_cast<float>(globalPosition_.x - origin_.x),
-                          static_cast<float>(globalPosition_.y - origin_.y),
-                          static_cast<float>(globalPosition_.z - origin_.z));
+    // === Позиция ставится извне (телом игрока), не этим методом ===
+    //
+    // Раньше здесь было свободное «летание»: WASD двигали камеру по front_/right_,
+    // Q/E — по вертикали, скорость менялась колесом. Из-за этого игрок висел
+    // в воздухе без физического тела и не мог ни ходить, ни падать на рельеф.
+    // Теперь камера — только обзор мышью, а точку наблюдения ей сообщает
+    // владелец тела игрока (см. setGlobalPosition).
 
     // === Матрицы ===
     recomputeView();
