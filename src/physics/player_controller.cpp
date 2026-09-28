@@ -18,7 +18,8 @@ void PlayerController::update(
     entt::registry& registry,
     PhysicsWorld& world,
     float deltaTime,
-    float yaw
+    const glm::vec3& forward,
+    const glm::vec3& right
 ) {
     auto view = registry.view<ecs::RigidBody, ecs::Player>();
     for (const entt::entity entity : view) {
@@ -61,15 +62,23 @@ void PlayerController::update(
         if (core::Input::isKeyPressed(GLFW_KEY_D)) wish.x += 1.0f;
         if (core::Input::isKeyPressed(GLFW_KEY_A)) wish.x -= 1.0f;
         if (wish != glm::vec3(0.0f)) {
-            // Поворот базиса взгляда вокруг Y: forward = (cos yaw, 0, sin yaw).
-            const float c = std::cos(yaw);
-            const float s = std::sin(yaw);
-            const glm::vec3 world3{
-                wish.x * c + wish.z * s,
-                0.0f,
-                -wish.x * s + wish.z * c
-            };
-            wish = glm::normalize(world3);
+            // Базис берём у камеры: forward — куда смотрим, right — вправо от
+            // взгляда. Оба проецируем на XZ: вертикальный компонент (pitch) в
+            // горизонтальном движении не участвует, иначе взгляд вниз тянул бы
+            // персонажа в землю. Камера задаёт front_ = (cos y cos p, sin p,
+            // cos y sin p), right_ = front x up, поэтому W всегда ведёт ровно
+            // туда, куда смотрит камера.
+            glm::vec3 flatForward(forward.x, 0.0f, forward.z);
+            glm::vec3 flatRight(right.x, 0.0f, right.z);
+            if (glm::length(flatForward) < 1.0e-4f) {
+                // Камера смотрит строго вверх/вниз — берём любой горизонтальный
+                // вектор, иначе получим нулевое направление и персонаж встанет.
+                flatForward = glm::vec3(0.0f, 0.0f, -1.0f);
+            }
+            flatForward = glm::normalize(flatForward);
+            flatRight = glm::normalize(
+                flatRight - flatForward * glm::dot(flatRight, flatForward));
+            wish = glm::normalize(wish.z * flatForward + wish.x * flatRight);
         }
 
         const bool running = core::Input::isKeyPressed(GLFW_KEY_LEFT_SHIFT) ||

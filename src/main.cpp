@@ -178,6 +178,9 @@ int main() {
 
         // Сущность игрока. Пуста (entt::null), пока суша не найдена.
         entt::entity playerEntity = entt::null;
+        // Предыдущая локальная позиция тела: по разнице с текущей считается
+        // вектор движения для проверки направления.
+        glm::vec3 prevPlayerLocal{0.0f};
 
         // Сдвиг floating origin обрабатывает ChunkManager для ЧАНКОВ, но тела,
         // созданные вне чанков (игрок, агенты), о нём не знают: их локальные
@@ -439,7 +442,8 @@ int main() {
             // Контроллер ЗАДАЁТ скорость тела, потом идёт шаг симуляции, потом
             // позиция тела возвращается в ECS. Камера ведётся от тела — то есть
             // игрок стоит на рельефе под гравитацией, а не висит в воздухе.
-            playerController.update(world.registry(), physicsWorld, dt, camera.yaw());
+            playerController.update(world.registry(), physicsWorld, dt,
+                                  camera.front(), camera.right());
             physicsSystem.update(world.registry(), dt);
             cameraFollowsPlayer();
             // Свет и морозность сезона — в UBO этого кадра. Раньше это делал
@@ -514,6 +518,33 @@ int main() {
                 break;
             }
 
+            // Насколько направление движения совпадает со взглядом. W должен
+            // вести ровно туда, куда смотрит камера, поэтому при движении угол
+            // близок к нулю. Раньше базис был собран с перепутанными X и Z, и
+            // игрок бежал в сторону, отличную от взгляда, на ЛЮБОМ yaw.
+            double playerLookAngleDeg = 0.0;
+            {
+                const auto view = world.registry().view<const ecs::Transform, const ecs::Player>();
+                for (const entt::entity e : view) {
+                    const auto& tr = world.registry().get<const ecs::Transform>(e);
+                    const glm::vec3 step = tr.position - prevPlayerLocal;
+                    prevPlayerLocal = tr.position;
+                    const float len = std::sqrt(step.x * step.x + step.z * step.z);
+                    if (len > 1.0e-4f) {
+                        const glm::vec3 moveDir = glm::vec3(step.x / len, 0.0f, step.z / len);
+                        const glm::vec3 look = camera.front();
+                        const float flat = std::sqrt(look.x * look.x + look.z * look.z);
+                        if (flat > 1.0e-4f) {
+                            const glm::vec3 lookDir = glm::vec3(look.x / flat, 0.0f, look.z / flat);
+                            playerLookAngleDeg = std::acos(
+                                std::clamp(glm::dot(moveDir, lookDir), -1.0f, 1.0f)) *
+                                                57.2957795f;
+                        }
+                    }
+                    break;
+                }
+            }
+
             double agentRestError = 0.0;
             {
                 std::size_t n = 0;
@@ -563,6 +594,7 @@ int main() {
                         " v=" + std::to_string(playerController.state().horizontalSpeed) +
                         "м/с" + (playerController.state().running ? " бег" : " шаг") +
                         " y-рельеф=" + std::to_string(playerAboveTerrain) + "м" +
+                        " угол(движ,взгляд)=" + std::to_string(playerLookAngleDeg) + "°" +
                         " | агенты на рельефе: отклонение=" +
                         std::to_string(agentRestError) + " м" +
                         " yaw=" + std::to_string(camera.yaw() * 57.2958f) + "°" +
