@@ -104,7 +104,10 @@ int main() {
         // сначала ставим камеру на безопасную высоту над уровнем моря и ждём
         // первых загруженных чанков, после чего переносим на сушу.
         camera.init(glm::dvec3(0.0, 600.0, 0.0), glm::dvec3(0.0, 600.0, -100.0));
-        bool spawnResolved = false;
+        bool spawnPointResolved = false;
+        bool spawnPointPending = false;
+        double spawnX = 0.0;
+        double spawnZ = 0.0;
 
         // === Растительность: 20 000 деревьев одним draw call ===
         //
@@ -217,6 +220,13 @@ int main() {
         // на высоте глаз; ориентацию (yaw/pitch) задаёт мышь в camera.update().
         const auto cameraFollowsPlayer = [&]() {
             if (playerEntity == entt::null) {
+                // Тела ещё нет (ждём загрузки чанка спавна) — держим камеру
+                // над точкой спавна, иначе стриминг уведёт её обратно в
+                // мировое начало, а потом origin откатится следом.
+                if (spawnPointPending) {
+                    camera.setGlobalPosition(
+                        glm::dvec3(spawnX, camera.globalPosition().y, spawnZ));
+                }
                 return;
             }
             const auto view = world.registry().view<const ecs::Transform, const ecs::Player>();
@@ -307,11 +317,47 @@ int main() {
             // Ищем по probeHeightAt(), а не по heightAtGlobal(): проба не
             // требует загруженного чанка, поэтому можно искать сушу далеко за
             // пределами viewDistance (6 км) и телепортироваться туда сразу.
-            if (!spawnResolved && chunks.loadedChunkCount() >= 1) {
-                spawnResolved = true;
+            //
+            // Фаза 2: тело создаётся отдельным шагом, когда чанк спавна уже
+            // ЗАГРУЖЕН. Раньше капсула появлялась в том же кадре, что и
+            // teleportOrigin, то есть под ней ещё не было ни mesh, ни
+            // коллайдера, и первые кадры она падала в пустоту.
+            if (spawnPointPending && playerEntity == entt::null) {
+                const double h = chunks.heightAtGlobal(spawnX, spawnZ);
+                if (std::isfinite(h)) {
+                    spawnPointPending = false;
+                    // Ставим капсулу на РЕАЛЬНУЮ высоту загруженного рельефа
+                    // (heightAtGlobal), а не на пробу: probeHeightAt считает
+                    // непрерывную функцию и на берегу может отличаться от
+                    // дискретной сетки чанка. Источник истины — коллайдер,
+                    // на котором игрок потом и стоит.
+                    const float halfHeight = 0.5f * kPlayerHeight - kPlayerRadius;
+                    const glm::vec3 bodyCenter{
+                        static_cast<float>(spawnX - chunks.origin().x),
+                        static_cast<float>(h + 0.5 * kPlayerHeight + 0.05),
+                        static_cast<float>(spawnZ - chunks.origin().z)};
+                    playerEntity = world.createEntity();
+                    world.registry().emplace<ecs::Transform>(
+                        playerEntity, ecs::Transform{bodyCenter, {}, {1.0f, 1.0f, 1.0f}});
+                    // Тело НЕ рисуем: камера от первого лица стоит на высоте
+                    // глаз (1.62 м) внутри капсулы высотой 1.8 м, и собственный
+                    // меш закрывал бы весь обзор изнутри. Физика полноценная.
+                    world.registry().emplace<ecs::RigidBody>(
+                        playerEntity,
+                        ecs::RigidBody{physicsWorld.createDynamicCapsule(
+                            halfHeight, kPlayerRadius, bodyCenter)});
+                    ecs::Player playerParams{};
+                    playerParams.radius = kPlayerRadius;
+                    playerParams.height = kPlayerHeight;
+                    world.registry().emplace<ecs::Player>(playerEntity, playerParams);
+                    core::Logger::info("Игрок: капсула поставлена на сушу, высота=" +
+                                       std::to_string(h) + " м");
+                }
+            }
+
+            if (!spawnPointPending && !spawnPointResolved && chunks.loadedChunkCount() >= 1) {
+                spawnPointResolved = true;
                 const double step = chunkConfig.chunkSize;
-                double spawnX = 0.0;
-                double spawnZ = 0.0;
                 double ground = 0.0;
                 bool found = false;
                 // Расширяющиеся кольца: 0 — точка старта, дальше по 1 чанку.
@@ -341,32 +387,21 @@ int main() {
                     camera.setOrigin(glm::dvec3(chunks.origin().x, chunks.origin().y,
                                                  chunks.origin().z));
 
-                    // --- Физическое тело игрока: капсула ногами на земле. ---
-                    // Jolt ждёт halfHeight цилиндра, поэтому вычитаем два
-                    // радиуса: полная высота капсулы = kPlayerHeight.
-                    const float halfHeight = 0.5f * kPlayerHeight - kPlayerRadius;
-                    const glm::vec3 bodyCenter{
-                        static_cast<float>(spawnX - chunks.origin().x),
-                        static_cast<float>(ground + 0.5 * kPlayerHeight + 0.05),
-                        static_cast<float>(spawnZ - chunks.origin().z)};
-                    playerEntity = world.createEntity();
-                    world.registry().emplace<ecs::Transform>(
-                        playerEntity, ecs::Transform{bodyCenter, {}, {1.0f, 1.0f, 1.0f}});
-                    // Тело НЕ рисуем: камера стоит на высоте глаз (1.62 м) внутри
-                    // капсулы высотой 1.8 м, и собственный меш закрывал бы весь
-                    // обзор изнутри. В шутерах от первого лица тело не видно.
-                    // Физика (ecs::RigidBody) при этом полноценная.
-                    world.registry().emplace<ecs::RigidBody>(
-                        playerEntity,
-                        ecs::RigidBody{physicsWorld.createDynamicCapsule(
-                            halfHeight, kPlayerRadius, bodyCenter)});
-                    ecs::Player playerParams{};
-                    playerParams.radius = kPlayerRadius;
-                    playerParams.height = kPlayerHeight;
-                    world.registry().emplace<ecs::Player>(playerEntity, playerParams);
+                    // Ключевой момент: origin телепортирован ЗАРАНЕЕ, чем
+                    // появится тело. rebaseDynamicBodies() считает изменение
+                    // origin обычным сдвигом и переносит все существующие тела
+                    // на -delta. Если не обновить lastOrigin здесь, то в этом
+                    // же кадре rebase отменит телепорт: сдвинет только что
+                    // созданного игрока назад на 57926 м, и тот окажется в
+                    // мировом начале (в океане). Именно это и было причиной
+                    // «спавна в море».
+                    lastOrigin = chunks.origin();
 
-                    // Камера — на высоте глаз, взгляд горизонтально (иначе W
-                    // уводит в рельеф).
+                    spawnPointPending = true;
+
+                    // Камера — на высоте глаз над пробой, взгляд горизонтально
+                    // (иначе W уводит в рельеф). Точную высоту подтвердим в
+                    // фазе 2, когда чанк загрузится.
                     const double eyeY = ground + kPlayerEyeHeight;
                     camera.init(glm::dvec3(spawnX, eyeY, spawnZ),
                                  glm::dvec3(spawnX, eyeY, spawnZ - 400.0));
