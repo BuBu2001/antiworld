@@ -186,6 +186,10 @@ private:
     // Модульные объекты рендера.
     RenderPass renderPass_;
     GraphicsPipeline pipeline_;
+    // Небо: тот же render pass и тот же набор дескрипторов, что и сцена
+    // (UBO кадра один на оба), но свой пайплайн с depthCompare = EQUAL.
+    // Рисуется ПОСЛЕ геометрии — иначе небо затерлось бы ландшафтом.
+    GraphicsPipeline skyPipeline_;
     // Карта мира: текстура (не зависит от swapchain и переживает resize) и
     // проход (пайплайн зависит от render pass, поэтому пересоздаётся вместе с ним).
     Texture worldMapTexture_;

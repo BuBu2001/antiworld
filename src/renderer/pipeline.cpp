@@ -32,14 +32,32 @@ GraphicsPipeline::~GraphicsPipeline() {
 }
 
 void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
-                           VkDescriptorSetLayout descriptorSetLayout, bool fullscreen) {
+                           VkDescriptorSetLayout descriptorSetLayout, PipelineMode mode) {
     device_ = device;
 
     // Шейдерные модули: вершинный и фрагментный (скомпилированы glslc'ом).
-    Shader vertexShader(
-        device_, shaderPath(fullscreen ? "map.vert.spv" : "triangle.vert.spv"));
-    Shader fragmentShader(
-        device_, shaderPath(fullscreen ? "map.frag.spv" : "triangle.frag.spv"));
+    const char* vertName = nullptr;
+    const char* fragName = nullptr;
+    switch (mode) {
+        case PipelineMode::Scene:
+            vertName = "triangle.vert.spv";
+            fragName = "triangle.frag.spv";
+            break;
+        case PipelineMode::Fullscreen:
+            vertName = "map.vert.spv";
+            fragName = "map.frag.spv";
+            break;
+        case PipelineMode::Sky:
+            vertName = "sky.vert.spv";
+            fragName = "sky.frag.spv";
+            break;
+    }
+    Shader vertexShader(device_, shaderPath(vertName));
+    Shader fragmentShader(device_, shaderPath(fragName));
+
+    // Режимы без вершинного ввода: и карта мира, и небо синтезируют три
+    // вершины из gl_VertexIndex, поэтому vertex input им не нужен вовсе.
+    const bool noVertexInput = mode != PipelineMode::Scene;
 
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
     shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -119,10 +137,10 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInputInfo.vertexBindingDescriptionCount =
-        fullscreen ? 0u : static_cast<uint32_t>(bindingDescriptions.size());
+        noVertexInput ? 0u : static_cast<uint32_t>(bindingDescriptions.size());
     vertexInputInfo.pVertexBindingDescriptions = bindingDescriptions.data();
     vertexInputInfo.vertexAttributeDescriptionCount =
-        fullscreen ? 0u : static_cast<uint32_t>(attributeDescriptions.size());
+        noVertexInput ? 0u : static_cast<uint32_t>(attributeDescriptions.size());
     vertexInputInfo.pVertexAttributeDescriptions = attributeDescriptions.data();
 
     // Сборка треугольников из каждых трёх вершин.
@@ -156,11 +174,26 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    // Карта рисуется поверх очищенного кадра: depth отключён, иначе полно-
-    // экранный треугольник отсекался бы очищенной глубиной 1.0.
-    depthStencil.depthTestEnable = fullscreen ? VK_FALSE : VK_TRUE;
-    depthStencil.depthWriteEnable = fullscreen ? VK_FALSE : VK_TRUE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    // Три разных режима глубины, и различие здесь принципиально:
+    //  * Scene — обычное LESS с записью: ландшафт пишет глубину;
+    //  * Fullscreen (карта) — depth выключен: рисуется поверх очищенного
+    //    кадра, иначе полноэкранный треугольник отсёкся бы очисткой 1.0;
+    //  * Sky — depth ТЕСТИРУЕТСЯ, но не пишется, и сравнение EQUAL против
+    //    очистки 1.0. Небо пропускает ровно те пиксели, где сцена глубину
+    //    не записала, и не тратит шейдер на землю.
+    if (mode == PipelineMode::Fullscreen) {
+        depthStencil.depthTestEnable = VK_FALSE;
+        depthStencil.depthWriteEnable = VK_FALSE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    } else if (mode == PipelineMode::Sky) {
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_FALSE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL;
+    } else {
+        depthStencil.depthTestEnable = VK_TRUE;
+        depthStencil.depthWriteEnable = VK_TRUE;
+        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+    }
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 

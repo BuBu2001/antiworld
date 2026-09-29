@@ -103,7 +103,7 @@ void WorldMapPass::init(VkDevice device, VkPhysicalDevice physicalDevice,
     descriptorSets_.resize(framesInFlight);
     VK_CHECK(vkAllocateDescriptorSets(device, &setAlloc, descriptorSets_.data()));
 
-    pipeline_.init(device, renderPass, setLayout_, /*fullscreen=*/true);
+    pipeline_.init(device, renderPass, setLayout_, PipelineMode::Fullscreen);
     core::Logger::info("Vulkan: проход карты мира создан");
 }
 

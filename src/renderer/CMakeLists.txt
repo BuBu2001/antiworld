@@ -11,9 +11,19 @@ endif()
 set(SHADER_OUTPUT_DIR ${CMAKE_BINARY_DIR}/shaders)
 file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
+# Общие куски GLSL (sky_common.glsl) подключаются через #include из
+# triangle.frag и sky.frag. -I нужен glslc'у, иначе он не найдёт файл по
+# имени; каждый шейдер также пересобирается при изменении общего куска —
+# без этого в DEPENDS правка неба не пересобирала бы terrain.frag, и два
+# шейдера разошлись бы по цвету дымки.
+set(SHADER_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/shaders)
+set(SHADER_COMMON ${SHADER_INCLUDE_DIR}/sky_common.glsl)
+
 set(SHADER_SOURCES
     ${CMAKE_SOURCE_DIR}/shaders/triangle.vert
     ${CMAKE_SOURCE_DIR}/shaders/triangle.frag
+    ${CMAKE_SOURCE_DIR}/shaders/sky.vert
+    ${CMAKE_SOURCE_DIR}/shaders/sky.frag
     ${CMAKE_SOURCE_DIR}/shaders/map.vert
     ${CMAKE_SOURCE_DIR}/shaders/map.frag
 )
@@ -24,8 +34,8 @@ foreach(shader IN LISTS SHADER_SOURCES)
     set(shader_output ${SHADER_OUTPUT_DIR}/${shader_name}.spv)
     add_custom_command(
         OUTPUT ${shader_output}
-        COMMAND ${GLSLC} -O ${shader} -o ${shader_output}
-        DEPENDS ${shader}
+        COMMAND ${GLSLC} -I${SHADER_INCLUDE_DIR} -O ${shader} -o ${shader_output}
+        DEPENDS ${shader} ${SHADER_COMMON}
         COMMENT "Компиляция шейдера ${shader_name}"
         VERBATIM
     )

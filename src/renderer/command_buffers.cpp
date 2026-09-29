@@ -58,7 +58,7 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
                             GraphicsPipeline& pipeline,
                             std::span<const MeshDraw> meshDraws, VkClearColorValue clearColor,
                             VkDescriptorSet descriptorSet, VkBuffer instanceBuffer,
-                            bool fullscreen) {
+                            bool fullscreen, GraphicsPipeline* skyPipeline) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -152,11 +152,23 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
         pipeline.countDrawCall();
     }
 
+    // Небо — после всей геометрии, последним draw'ом кадра. Оно само
+    // отсекается по глубине (EQUAL против очистки 1.0), так что перекрывать
+    // ландшафт не может; рисовать его раньше бессмысленно — небо стёрлось бы
+    // первым же треугольником чанка.
+    if (skyPipeline != nullptr) {
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          skyPipeline->handle());
+        // Тот же набор дескрипторов, что у сцены: UBO кадра один на оба
+        // пайплайна, и перепривязывать его не нужно.
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        skyPipeline->countDrawCall();
+    }
+
     vkCmdEndRenderPass(commandBuffer);
 
     VK_CHECK(vkEndCommandBuffer(commandBuffer));
 }
-
 void CommandBuffers::destroy() {
     if (device_ == VK_NULL_HANDLE) {
         return;

@@ -324,12 +324,17 @@ int main() {
         };
 
         double lastTime = glfwGetTime();
+        // Секунды с начала запуска: единый источник времени для анимации
+        // облаков и травы. Отдельные таймеры в разных шейдерах разошлись бы
+        // по фазе, и ветер в траве шёл бы вразнобой с движением облаков.
+        float worldTimeSeconds = 0.0f;
         float telemetryTimer_ = 0.0f;
         bool treesSpawned = false;
 
         // Главный цикл рендера: обрабатываем события, рисуем кадр, повторяем.
         while (!window.shouldClose()) {
             const auto frameStart = std::chrono::steady_clock::now();
+            worldTimeSeconds = static_cast<float>(glfwGetTime());
             window.pollEvents();
 
             // Выход по Escape.
@@ -543,6 +548,19 @@ int main() {
             env.frost = climate.frost();
             env.seaLevel = 0.0f;  // geo.seaLevel по умолчанию
             env.hasWater = 1.0f;  // география включена: океан в мире есть
+            // Небо и растительность смотрят в ту же сцену, что и ландшафт, и
+            // обязаны знать о ней то же самое: где камера (для параллакса
+            // облаков), какое время суток (для сумерек и звёзд), где сдвиг
+            // floating origin (без него проекция на слой облаков уехала бы на
+            // десятки километров).
+            env.cameraPosition = glm::vec3(camera.globalPosition());
+            env.dayTime = climate.timeOfDay();
+            env.timeSeconds = worldTimeSeconds;
+            // Ветер и облачность пока не выведены в настройки мира; берём
+            // умеренные значения — заметный, но не мешающий ветер.
+            env.windStrength = 0.5f;
+            env.cloudCover = 0.42f;
+            env.worldOrigin = glm::vec3(chunks.origin());
             world.setEnvironment(env);
 
             // --- Инстансная растительность: culling + сбор DrawData ---

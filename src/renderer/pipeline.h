@@ -4,9 +4,23 @@
 
 namespace renderer {
 
-// Графический пайплайн: вершинный ввод (position + normal + UV + color +
-// snowBias), шейдеры, rasterization, мультисэмплинг, color blend и
-// depth/stencil.
+// Какой набор шейдеров и какой режим ввода/глубины у пайплайна. Раньше это был
+// булев fullscreen, но появился третий случай — небо, — который отличается от
+// карты тем, что depth test у него ВКЛЮЧЁН (сравнение EQUAL против очистки
+// 1.0), а запись выключена. Булевым флагом это уже не выражается.
+enum class PipelineMode {
+    // Обычная сцена: вершины из vertex buffer, шаг sizeof(Vertex),
+    // инстанс-матрицы в locations 7..10, depth test/write включены.
+    Scene,
+    // Полноэкранный треугольник поверх очищенного кадра: вершин нет вообще
+    // (gl_VertexIndex), depth отключён. Так рисуется карта мира.
+    Fullscreen,
+    // Небо: вершин нет, но depth test EQUAL + запись выключена, поэтому
+    // шейдер выполняется только там, где сцена не записала глубину.
+    // Требует рисования ПОСЛЕ геометрии сцены.
+    Sky,
+};
+
 class GraphicsPipeline {
 public:
     GraphicsPipeline() = default;
@@ -18,18 +32,14 @@ public:
 
     // Загружает вершинный/фрагментный шейдеры и создаёт пайплайн,
     // совместимый с переданным render pass'ом. descriptorSetLayout —
-    // layout дескрипторного набора камеры (UBO MVP), хранится в
+    // layout дескрипторного набора камеры (UBO кадра), хранится в
     // UniformBuffer; передаётся в VkPipelineLayoutCreateInfo.pSetLayouts.
-    // fullscreen = false — обычная сцена: вершины из vertex buffer, шаг
-    // sizeof(Vertex), инстанс-матрицы в locations 7..10, depth test включён.
     //
-    // fullscreen = true — режим карты мира: шейдер сам синтезирует три
-    // вершины из gl_VertexIndex, поэтому vertex input не нужен вовсе, а
-    // depth test/write выключены (карта рисуется поверх очищенного кадра).
-    // Так карта не трогает формат вершины сцены (шаг 56 байт) и её
-    // locations, о которых договаривались шейдеры terrain/tree/water.
+    // mode выбирает пару шейдеров (triangle/map/sky) и режим ввода вершин и
+    // глубины — см. PipelineMode. Смешивание (cull/depth write) у всех
+    // режимов одинаковое, различается только то, откуда берутся вершины.
     void init(VkDevice device, VkRenderPass renderPass,
-              VkDescriptorSetLayout descriptorSetLayout, bool fullscreen = false);
+              VkDescriptorSetLayout descriptorSetLayout, PipelineMode mode = PipelineMode::Scene);
     // Уничтожает пайплайн и layout; повторный вызов безопасен.
     void destroy();
 

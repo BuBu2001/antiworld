@@ -24,10 +24,18 @@ layout(binding = 0) uniform UBO {
     // xyz — единичный вектор НА солнце, w — интенсивность солнца.
     vec4 sunDirection;
     // x — frost (морозность сезона), y — ambient, z — seaLevel (уровень моря),
-    // w — время суток.
+    // w — время суток 0..1.
     vec4 environment;
     // x — есть ли в мире океан (1/0).
     vec4 waterFlags;
+    // Обратная viewProjection и позиция камеры нужны небу (sky.vert), здесь
+    // объявлены, чтобы layout UBO был один на все шейдеры кадра.
+    mat4 inverseViewProjection;
+    vec4 cameraPosition;
+    // x — время в секундах, y — сила ветра, z — покрытость облаками.
+    vec4 wind;
+    // xyz — сдвиг floating origin в мировых координатах.
+    vec4 worldOrigin;
 } ubo;
 
 layout(location = 0) out vec3 fragNormal;
@@ -43,9 +51,44 @@ layout(location = 4) out vec3 fragWorldPosition;
 // Насколько точка ниже ЛОКАЛЬНОГО уровня моря. Отрицательное значение — суша
 // выше воды; по нему же считается прибойная полоса на берегу.
 layout(location = 5) out float fragWaterDepth;
+// Насколько точка гибкая: 0 у рельефа и камней, больше — у травы и крон.
+layout(location = 6) out float fragFlex;
 
 void main() {
-    gl_Position = ubo.viewProjection * inModel * vec4(inPosition, 1.0);
+    vec3 localPos = inPosition;
+
+    // Ветер. Гибкость закодирована генератором геометрии в uv.x, а высота
+    // внутри растения — в uv.y (0 у основания, 1 у макушки). У рельефа uv
+    // нулевой, поэтому качается только инстансная растительность, и
+    // ландшафт не «дышит» вместе с травой.
+    if (inUV.x > 0.0) {
+        // Смещение растёт к вершине (квадрат высоты), иначе ствол у самой
+        // земли двигался бы вместе с макушкой, и растение казалось бы
+        // выдвинутым из земли целиком.
+        const float lever = inUV.y * inUV.y;
+        // Три несинхронные частоты: порывистая основная (около 0.33 Гц),
+        // медленная (0.09 Гц) и быстрая мелкая дрожь (0.75 Гц). Одна
+        // синусоида даёт заметную «маятниковую» качку, три — ветер.
+        const float t = ubo.wind.x;
+        // Пространственная фаза: у соседних растений она разная, иначе всё
+        // поле колыхалось синхронно, что выдаёт общий порыв ветра.
+        const float phaseX = inModel[3].x * 0.35 + inModel[3].z * 0.27;
+        const float phaseZ = inModel[3].z * 0.41 - inModel[3].x * 0.19;
+        const float sway = sin(t * 2.1 + phaseX) * 0.6 + sin(t * 0.57 + phaseZ) * 0.4 +
+                           sin(t * 4.7 + phaseX * 2.3) * 0.18;
+        const float cross = cos(t * 1.7 + phaseZ * 1.1);
+        // Порывы: медленная низкочастотная модуляция амплитуды.
+        const float gust = 0.65 + 0.35 * sin(t * 0.37 + phaseZ * 0.13);
+        const float amount = inUV.x * lever * ubo.wind.y * gust;
+        // Смещение задаём в МИРОВЫХ метрах, поэтому делим на масштаб
+        // инстанса: иначе трава с масштабом 0.3 еле заметно шевелилась бы,
+        // а дерево с масштабом 1.6 заваливалось. inModel = T·R·S, поэтому
+        // длина нулевого столбца и есть масштаб.
+        const float modelScale = max(length(inModel[0].xyz), 1e-4);
+        localPos.xz += vec2(sway, cross * 0.7) * (amount / modelScale);
+    }
+
+    gl_Position = ubo.viewProjection * inModel * vec4(localPos, 1.0);
     // Нормаль переводится в мировые координаты обратной транспонированной
     // матрицей: у неунитарного масштаба (например, у сплюснутой модели)
     // transform(normal) исказил бы направление.
@@ -70,7 +113,8 @@ void main() {
     fragAlbedo = inColor;
     fragSnowBias = inSnowBias;
     fragWater = inWater;
-    fragWorldPosition = (inModel * vec4(inPosition, 1.0)).xyz;
+    fragWorldPosition = (inModel * vec4(localPos, 1.0)).xyz;
+    fragFlex = inUV.x;
     // Глубина в ЛОКАЛЬНЫХ координатах вершины, а не в мировых: флаг воды и
     // уровень моря заполняются из одной и той же карты высот в локальных
     // единицах, поэтому сравнение обязано быть в тех же единицах, иначе

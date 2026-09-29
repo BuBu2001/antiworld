@@ -10,6 +10,7 @@
 #include <string>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include "core/logger.h"
 #include "core/window.h"
@@ -225,6 +226,10 @@ void VulkanBase::createRenderTargets() {
                                    depthImageView_);
     uniformBuffer_.init(device_, physicalDevice_, kMaxFramesInFlight);
     pipeline_.init(device_, renderPass_.handle(), uniformBuffer_.layout());
+    // Небо живёт в том же render pass и читает тот же UBO кадра, поэтому
+    // набор дескрипторов отдельный ему не нужен — меняется только пайплайн.
+    skyPipeline_.init(device_, renderPass_.handle(), uniformBuffer_.layout(),
+                      PipelineMode::Sky);
     // Проход карты пересоздаём вместе с render pass: его пайплайн собран под
     // формат swapchain. Текстура карты при этом сохраняется — от swapchain она
     // не зависит, и перезаливать 32 МБ пикселей при каждом resize незачем.
@@ -236,6 +241,7 @@ void VulkanBase::createRenderTargets() {
 
 void VulkanBase::destroyRenderTargets() {
     worldMapPass_.destroy();
+    skyPipeline_.destroy();
     pipeline_.destroy();
     uniformBuffer_.destroy();
     renderPass_.destroy();
@@ -335,16 +341,37 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     frameData.sunDirection =
         glm::vec4{glm::normalize(environment.sunDirection), environment.sunIntensity};
     // x — frost, y — ambient, z — seaLevel (уровень моря из географии мира),
-    // w — время суток (пока фиксированный полдень).
-    frameData.environment =
-        glm::vec4{environment.frost, environment.ambient, environment.seaLevel, 0.5f};
+    // w — время суток 0..1. Раньше здесь стоял фиксированный полдень, из-за
+    // чего сумеречное небо и ночные звёзды были недостижимы: небо появлялось
+    // всегда при свете, будто съёмка велась в полдень.
+    frameData.environment = glm::vec4{environment.frost, environment.ambient,
+                                      environment.seaLevel, environment.dayTime};
     // x — есть ли в мире океан: без флага шейдер не рисует воду даже если
     // какая-то вершина случайно оказалась ниже уровня моря (география выкл.).
     frameData.waterFlags = glm::vec4{environment.hasWater, 0.0f, 0.0f, 0.0f};
+    // Обратная viewProjection для неба: у него нет вершин, поэтому луч
+    // взгляда восстанавливается только так. Обратную матрицу считаем здесь
+    // же — на GPU инверсия 4x4 ничего не стоит, а на CPU пришлось бы тянуть
+    // инверсию в FrameEnvironment и рисковать рассинхроном.
+    frameData.inverseViewProjection = glm::inverse(viewProjection);
+    // Позиция камеры нужна небу для параллакса облаков: без неё слой
+    // «приклеен» к камере и не сдвигается при ходьбе.
+    frameData.cameraPosition =
+        glm::vec4{environment.cameraPosition, environment.dayTime};
+    // x — время в секундах (анимация ветра и облаков), y — сила ветра,
+    // z — покрытость неба облаками. Пока облака не заданы настройкой мира,
+    // берётся значение по умолчанию — примерно половина неба в кучевой
+    // облачности, как в средней полосе.
+    frameData.wind = glm::vec4{environment.timeSeconds, environment.windStrength,
+                               environment.cloudCover, 0.0f};
+    // Сдвиг floating origin: рендер считает в локальных координатах, а небу
+    // нужны мировые (проекция на слой облаков).
+    frameData.worldOrigin = glm::vec4{environment.worldOrigin, 0.0f};
     uniformBuffer_.update(currentFrame_, frameData);
     commandBuffers_.record(commandBuffer, renderPass_, imageIndex, swapChainExtent_,
                            pipeline_, meshDraws, kClearColor,
-                           uniformBuffer_.descriptorSet(currentFrame_), instanceBuffer);
+                           uniformBuffer_.descriptorSet(currentFrame_), instanceBuffer,
+                           /*fullscreen=*/false, &skyPipeline_);
     // Статистика для HUD: фактическое число draw-вызовов кадра (уже после
     // frustum culling на стороне вызывающего — см. CullingStats).
     lastDrawCalls_ = pipeline_.lastDrawCalls();

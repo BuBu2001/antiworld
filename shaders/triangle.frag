@@ -16,18 +16,30 @@
 // отражением неба. Суша под водой остаётся видна сквозь тонкий слой — как в
 // реальном море у берега.
 
+#extension GL_GOOGLE_include_directive : require
+
+// Тот же небо, что рисует sky.frag: отсюда берётся и дымка вдали, и тень от
+// облака на земле. Считать это двумя независимыми реализациями нельзя —
+// тогда горизонт получит чужеродную полосу.
+#include "sky_common.glsl"
+
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec3 fragAlbedo;
 layout(location = 2) in float fragSnowBias;
 layout(location = 3) in float fragWater;
 layout(location = 4) in vec3 fragWorldPosition;
 layout(location = 5) in float fragWaterDepth;
+layout(location = 6) in float fragFlex;
 
 layout(binding = 0) uniform UBO {
     mat4 viewProjection;
     vec4 sunDirection;
     vec4 environment;
     vec4 waterFlags;
+    mat4 inverseViewProjection;
+    vec4 cameraPosition;
+    vec4 wind;
+    vec4 worldOrigin;
 } ubo;
 
 layout(location = 0) out vec4 outColor;
@@ -50,6 +62,15 @@ void main() {
     // сдвигать layout и не ломать terrain/tree/water шейдеры.
     const float hasWater = ubo.waterFlags.x;
 
+    // Мировая точка. fragWorldPosition приходит в локальных координатах
+    // относительно floating origin, поэтому для неба, облаков и расстояния
+    // до камеры сдвиг origin нужно вернуть обратно: cloudShadow() проецирует
+    // точку на слой облаков, и без origin пятно уехало бы на 54 км в сторону.
+    const vec3 worldPos = fragWorldPosition + ubo.worldOrigin.xyz;
+    const vec3 viewVector = worldPos - ubo.cameraPosition.xyz;
+    const float viewDistance = length(viewVector);
+    const vec3 viewDir = viewVector / max(viewDistance, 1e-3);
+
     // Порог снега: frost + snowBias > 1. Полоса перехода 0.25 по frost
     // означает, что снег появляется и тает постепенно, а не скачком.
     const float cold = frost + fragSnowBias - 1.0f;
@@ -65,7 +86,12 @@ void main() {
     // Ламбертово освещение: у ландшафта без теней от карты, поэтому одного
     // направленного света и ambient достаточно.
     const float diffuse = max(dot(normal, sunDirection), 0.0f);
-    vec3 lit = albedo * (ambient + diffuse * ubo.sunDirection.w);
+
+    // Тень от облаков. Солнечный луч от точки земли доходит до слоя облаков
+    // и гаснет, если по дороге попал в тучу. Именно это, а не «облака на
+    // небе», делает небо живым на земле: пятна ползут и гаснут прямой свет.
+    const float shadow = cloudShadow(worldPos, sunDirection, ubo.wind.z);
+    vec3 lit = albedo * (ambient + diffuse * ubo.sunDirection.w * shadow);
 
     // --- Океан ---
     // Гладь только там, где география говорит «вода» (флаг) И точка ниже
@@ -73,29 +99,44 @@ void main() {
     // задаёт биом-океан, глубина — корректную линию берега против плавных
     // переходов смеси биомов.
     if (hasWater > 0.5 && fragWater > 0.5 && fragWaterDepth > 0.0f) {
-        // Глубина в точке: 0 у берега, 1 на максимальной глубине океана.
-        const float depth = clamp(fragWaterDepth / 12.0f, 0.0f, 1.0f);
+        // Насыщение цвета по глубине. Раньше делили на 12 мировых единиц — с
+        // тех пор, как рельеф стал метровым, это означало «любая вода глубже
+        // 12 м полностью тёмная», то есть весь океан был одного цвета и берег
+        // не читался. Теперь экспонента: 20 м — треть, 100 м — 80%,
+        // 2500 м — глубина.
+        const float depth = 1.0f - exp(-fragWaterDepth / 45.0f);
 
         // Волны: две синусоидальные ряби в мировых координатах + нормаль,
         // наклонённая по их градиенту. Это дешёвая имитация, но вода сразу
         // перестаёт выглядеть плоским полигоном.
-        const vec2 p = fragWorldPosition.xz;
-        const float waveA = sin(p.x * 0.12 + p.y * 0.07);
-        const float waveB = sin(p.x * 0.05 - p.y * 0.11);
+        //
+        // Амплитуда ряби должна убывать с глубиной: в мелкой воде видно дно и
+        // рябь читается, в глубокой волна — это блик, а не рельеф.
+        const vec2 p = worldPos.xz;
+        const float chop = mix(1.0f, 0.25f, depth);
         const vec3 waveNormal = normalize(vec3(
-            0.06 * cos(p.x * 0.12 + p.y * 0.07) * 0.12 +
-            0.04 * cos(p.x * 0.05 - p.y * 0.11) * 0.05,
+            (0.06 * cos(p.x * 0.12 + p.y * 0.07) * 0.12 +
+             0.04 * cos(p.x * 0.05 - p.y * 0.11) * 0.05) * chop,
             1.0,
-            0.06 * cos(p.x * 0.12 + p.y * 0.07) * 0.07 -
-            0.04 * cos(p.x * 0.05 - p.y * 0.11) * 0.11));
+            (0.06 * cos(p.x * 0.12 + p.y * 0.07) * 0.07 -
+             0.04 * cos(p.x * 0.05 - p.y * 0.11) * 0.11) * chop));
 
         const vec3 waterColor = mix(kShallowWaterColor, kDeepWaterColor, depth);
         // Блик: specular от солнца по нормали волн даёт живую поверхность.
         const float glint = pow(max(dot(reflect(-sunDirection, waveNormal),
                                         vec3(0.0, 1.0, 0.0)), 0.0f), 24.0f);
-        const float skyLike = ambient + 0.35 * ubo.sunDirection.w;
+        // Отражение неба на воде: не константа, а цвет неба в этом
+        // направлении — иначе вода ночью оставалась бы ярче неба. Остаётся
+        // линейным: общий тонмаппер кадра один, на выходе, иначе линейный
+        // свет смешивался бы с уже отображённым.
+        const vec3 reflection = skyBaseRadiance(ubo.cameraPosition.xyz,
+                                                reflect(-viewDir, waveNormal), sunDirection,
+                                                ubo.sunDirection.w, 3, 2);
+        const float skyLike = ambient + 0.35f * ubo.sunDirection.w;
         vec3 water = waterColor * skyLike + vec3(0.9f, 0.95f, 1.0f) * glint *
                      ubo.sunDirection.w;
+        // Гладь отражает небо: чем глубже, тем сильнее (мелкое дно видно).
+        water = mix(water, reflection, mix(0.18f, 0.45f, depth) * smoothstep(0.0f, 0.2f, normal.y));
         // Пена у самого берега.
         const float shore = 1.0f - smoothstep(0.0f, 1.2f, fragWaterDepth);
         water = mix(water, vec3(0.85f, 0.9f, 0.95f), shore * 0.35f);
@@ -105,5 +146,41 @@ void main() {
         lit = mix(lit, water, opacity);
     }
 
-    outColor = vec4(lit, 1.0f);
+    // --- Растительность: рассеянный блеск ---
+    // fragFlex > 0 только у травы и крон (их геометрия кодирует гибкость в
+    // uv.x). У листа воскообразная кутикула, поэтому на просвет он
+    // просвечивает зелёным, а на просвет края «зажигаются». Без этого трава
+    // выглядит серой кашицей — её нормально освещает только этот блеск.
+    if (fragFlex > 0.0) {
+        const float backlit = pow(max(dot(-viewDir, sunDirection), 0.0f), 3.0f);
+        const float rim = pow(1.0f - abs(dot(normal, viewDir)), 3.0f);
+        lit += vec3(0.30f, 0.45f, 0.16f) * albedo *
+               (backlit * 0.30f + rim * 0.45f) * ubo.sunDirection.w * shadow;
+    }
+
+    // --- Воздушная перспектива ---
+    // Дальний ландшафт не «светлеет в белое», а приобретает ЦВЕТ неба в том
+    // же направлении: под вечерним солнцем дымка над горизонтом золотая, на
+    // севере — синяя. Однотонная дымка даёт чужеродную серую полосу и
+    // «вырезает» дальние холмы.
+    if (viewDistance > 1.0f) {
+        const float fog = 1.0f - exp(-viewDistance * 0.00022f);
+        // Плотность дымки падает с высотой: с вершины горы видно дальше, чем
+        // из низины. Именно это отличает глубину от плоской картинки.
+        const float heightFalloff = exp(-max(worldPos.y, 0.0f) * 0.00016f);
+        const float hazeAmount = saturate1(fog * mix(1.0f, heightFalloff, 0.85f));
+        if (hazeAmount > 0.002f) {
+            // Тот же расчёт, что и в небе, но с 3 шагами вместо 8: шейдер
+            // выполняется на каждом пикселе земли, полная точность тут не
+            // окупается — под дымкой разница не видна.
+            lit = mix(lit, skyBaseRadiance(ubo.cameraPosition.xyz, viewDir, sunDirection,
+                                          ubo.sunDirection.w, 3, 2),
+                      hazeAmount);
+        }
+    }
+
+    // Общий тонмаппер кадра — тот же, что в sky.frag. Смешивать «уже
+    // тонмапленную» дымку с линейным светом нельзя, поэтому всё линейное
+    // смешивается до одного вызова.
+    outColor = vec4(tonemapACES(lit), 1.0f);
 }

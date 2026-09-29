@@ -40,11 +40,19 @@ public:
     // шейдер синтезирует из gl_VertexIndex. Так карта мира рисуется тем же
     // вызовом record(), то есть внутри уже открытого render pass: рисовать
     // ПОСЛЕ record() нельзя, он закрывает pass.
+    //
+    // skyPipeline (не nullptr) — пайплайн неба, который рисуется ПОСЛЕ всей
+    // геометрии, тем же вызовом и внутри того же pass. Его depthCompare =
+    // EQUAL против очистки 1.0 сам отсекает пиксели, занятые ландшафтом,
+    // поэтому порядок «сначала сцена, потом небо» не нужен — нужен лишь
+    // порядок записей, чтобы небо перекрывало там, где сцена не записала
+    // глубину, и не перекрывало ничего лишнего.
     void record(VkCommandBuffer commandBuffer, const RenderPass& renderPass,
                 size_t framebufferIndex, VkExtent2D extent,
                 GraphicsPipeline& pipeline, std::span<const MeshDraw> meshDraws,
                 VkClearColorValue clearColor, VkDescriptorSet descriptorSet,
-                VkBuffer instanceBuffer, bool fullscreen = false);
+                VkBuffer instanceBuffer, bool fullscreen = false,
+                GraphicsPipeline* skyPipeline = nullptr);
 
     VkCommandBuffer commandBuffer(uint32_t index) const { return commandBuffers_[index]; }
     // Пул для одноразовых command buffer'ов (загрузка текстур). Основной пул
