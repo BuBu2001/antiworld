@@ -21,12 +21,12 @@ public:
     // layout дескрипторного набора камеры (UBO MVP), хранится в
     // UniformBuffer; передаётся в VkPipelineLayoutCreateInfo.pSetLayouts.
     // fullscreen = false — обычная сцена: вершины из vertex buffer, шаг
-    // sizeof(Vertex), инстанс-матрицы в locations 6..9, depth test включён.
+    // sizeof(Vertex), инстанс-матрицы в locations 7..10, depth test включён.
     //
     // fullscreen = true — режим карты мира: шейдер сам синтезирует три
     // вершины из gl_VertexIndex, поэтому vertex input не нужен вовсе, а
     // depth test/write выключены (карта рисуется поверх очищенного кадра).
-    // Так карта не трогает формат вершины сцены (шаг 52 байта) и её
+    // Так карта не трогает формат вершины сцены (шаг 56 байт) и её
     // locations, о которых договаривались шейдеры terrain/tree/water.
     void init(VkDevice device, VkRenderPass renderPass,
               VkDescriptorSetLayout descriptorSetLayout, bool fullscreen = false);

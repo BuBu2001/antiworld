@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <glm/glm.hpp>
+
 namespace world {
 
 namespace {
@@ -18,6 +20,13 @@ float ramp(float value, float edge0, float edge1) {
     const float t = std::clamp((value - edge0) / (edge1 - edge0), 0.0f, 1.0f);
     return t * t * (3.0f - 2.0f * t);
 }
+
+// Цвет ледника: белый с голубым оттенком. Холоднее снега, потому что плотный
+// лёд отражает небо и пропускает свет глубже, чем рыхлый снежный покров, —
+// поэтому на нём всегда чуть темнее, чем на снегу.
+constexpr float kIceRed = 0.86f;
+constexpr float kIceGreen = 0.91f;
+constexpr float kIceBlue = 0.97f;
 
 }  // namespace
 
@@ -42,6 +51,10 @@ glm::vec3 BiomeBlend::color() const {
     for (std::size_t index = 0; index < kBiomeCount; ++index) {
         sum += weights_[index] * biomeColor(static_cast<Biome>(index));
     }
+    if (ice_ > 0.0f) {
+        const glm::vec3 ice{kIceRed, kIceGreen, kIceBlue};
+        sum = glm::mix(sum, ice, ice_);
+    }
     return sum;
 }
 
@@ -52,7 +65,7 @@ Biome getBiome(float height, float temperature, float humidity, const BiomeParam
 }
 
 BiomeBlend sampleBiome(float height, float temperature, float humidity,
-                       const BiomeParams& params) {
+                       const BiomeParams& params, float ice) {
     // Каждый признак — независимый гладкий индикатор в [0, 1], где 1 означает
     // «признак выражен сильнее всего».
     const float altitude = ramp(height, params.mountainStart, params.mountainEnd);
@@ -101,6 +114,13 @@ BiomeBlend sampleBiome(float height, float temperature, float humidity,
     const float frost = ramp(temperature, params.snowMelt, params.snowFreeze);
     blend.setSnowBias(
         std::clamp(params.snowFromCold * frost + params.mountainSnow * altitude, 0.0f, 1.0f));
+
+    // Лёд поверх: на леднике снег лежит круглый год, поэтому лёд поднимает
+    // снежность до единицы независимо от того, тепло ли внизу.
+    blend.setIce(ice);
+    if (ice > 0.0f) {
+        blend.setSnowBias(std::max(blend.snowBias(), ice));
+    }
 
     return blend;
 }

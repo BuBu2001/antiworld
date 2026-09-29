@@ -22,6 +22,13 @@ struct Vertex {
     // 0 — суша. Заполняется при генерации mesh; шейдер по нему рисует
     // океанскую гладь и отключает снег/биомы под водой.
     float water{0.0f};
+    // Локальный уровень моря в этой точке, в тех же единицах, что и position.y.
+    // Нужен потому, что уровень моря — ПОЛЕ (тёплый океан стоит выше
+    // холодного), а не константа: без него шейдер считал бы глубину воды и
+    // полосу прибоя по среднемировому уровню, и у локально затопленного берега
+    // «глубина» оказывалась бы отрицательной. Значение заполняется у всех
+    // вершин, включая сушу: по нему считается и прибойная полоса.
+    float localSeaLevel{0.0f};
 };
 
 static_assert(offsetof(Vertex, position) == 0);
@@ -30,8 +37,9 @@ static_assert(offsetof(Vertex, uv) == 24);
 static_assert(offsetof(Vertex, color) == 32);
 static_assert(offsetof(Vertex, snowBias) == 44);
 static_assert(offsetof(Vertex, water) == 48);
-// 52 байта: все поля — float-ы по 4 байта, естественное выравнивание Vertex
+static_assert(offsetof(Vertex, localSeaLevel) == 52);
+// 56 байт: все поля — float-ы по 4 байта, естественное выравнивание Vertex
 // равно 4, поэтому stride равен sizeof и годится для вершинного буфера Vulkan.
-static_assert(sizeof(Vertex) == 52);
+static_assert(sizeof(Vertex) == 56);
 
 }

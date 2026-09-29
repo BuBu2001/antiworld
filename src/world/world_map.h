@@ -11,11 +11,14 @@
 
 namespace world {
 
+class Climatology;
+
 // Карта всего мира: одна текстура RGBA8, покрывающая квадрат extent × extent
 // метров с центром в (0, 0).
 //
-// Мир — ПЛОСКИЙ (это не сфера), поэтому проекция простая: u растёт по +X,
-// v растёт по +Z. Никаких долгот и меридианов.
+// Проекция: u растёт по +X, v растёт по +Z. В 3D это натягивается на сферу
+// (см. shaders/map.frag), где те же UV читаются как долгота и широта, поэтому
+// карта равнопромежуточная — 2:1.
 //
 // Карта считается из ТОЙ ЖЕ функции высоты, что и рельеф
 // (TerrainGenerator::sampleHeightAt), поэтому материки на карте физически
@@ -42,6 +45,14 @@ public:
     // Config::width required before the end of its enclosing class».
     WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed);
     WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed, Config cfg);
+    // С климатологией карта красится ПО КЛИМАТУ, а не по высоте: температура,
+    // осадки, лёд и материальность вместо песка/зелени/скал. Передаётся
+    // указателем (не владеет): карта живёт в фоновом потоке, а Climatology
+    // построен раньше и умирает позже.
+    WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed,
+             const Climatology* climatology);
+    WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed, Config cfg,
+             const Climatology* climatology);
     ~WorldMap();
 
     WorldMap(const WorldMap&) = delete;
@@ -77,6 +88,9 @@ private:
     TerrainGenerator::Config terrain_;
     std::uint32_t seed_;
     Config config_;
+    // Не владеет, может быть nullptr — тогда карта красится по высоте, как
+    // раньше. Читается только в воркере, поле неизменяемо после build().
+    const Climatology* climatology_{nullptr};
 
     std::vector<std::uint8_t> pixels_;
     std::atomic<bool> ready_{false};

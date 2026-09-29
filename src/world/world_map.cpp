@@ -1,6 +1,7 @@
 #include "world/world_map.h"
 
 #include "core/logger.h"
+#include "world/climatology.h"
 
 #include <algorithm>
 #include <chrono>
@@ -39,13 +40,106 @@ glm::vec3 landColor(double heightFraction) {
     return mix(dryGrass, rock, (heightFraction - 0.55) / 0.45);
 }
 
+// --- Карта по климату ---
+//
+// Высотная раскраска показывает РЕЛЬЕФ, но не показывает главное: суша может
+// быть зелёной от материковой сырости и жёлтой от океанической, а это разные
+// миры. Климатическая раскраска отвечает на другой вопрос — «как здесь
+// живётся» — и читается как настоящая карта погоды/климата.
+
+constexpr double kPi = 3.14159265358979323846;
+
+// Синий -> зелёный -> жёлтый -> красный: универсальная шкала «мало -> много».
+glm::vec3 heatRamp(double value) {
+    const glm::vec3 cold{0.05f, 0.15f, 0.55f};
+    const glm::vec3 mild{0.10f, 0.55f, 0.30f};
+    const glm::vec3 warm{0.85f, 0.80f, 0.25f};
+    const glm::vec3 hot{0.80f, 0.18f, 0.10f};
+    const double t = std::clamp(value, 0.0, 1.0);
+    if (t < 0.4) {
+        return mix(cold, mild, t / 0.4);
+    }
+    if (t < 0.75) {
+        return mix(mild, warm, (t - 0.4) / 0.35);
+    }
+    return mix(warm, hot, (t - 0.75) / 0.25);
+}
+
+// Оттенки земли: тропики зелёные, пустыни песочные, тайга тёмная, тундра
+// серо-зелёная, лёд белый.
+glm::vec3 biomeTint(double temperature, double precipitation) {
+    const glm::vec3 tropic{0.16f, 0.42f, 0.18f};
+    const glm::vec3 temperate{0.22f, 0.45f, 0.20f};
+    const glm::vec3 taiga{0.14f, 0.30f, 0.17f};
+    const glm::vec3 tundra{0.42f, 0.44f, 0.36f};
+    const glm::vec3 ice{0.88f, 0.92f, 0.96f};
+    const glm::vec3 desert{0.80f, 0.72f, 0.48f};
+
+    if (temperature < -8.0) {
+        return ice;
+    }
+    if (temperature < 2.0) {
+        return mix(tundra, taiga, (temperature + 8.0) / 10.0);
+    }
+    // Суше и жарко — пустыня, но только если это не горы: их оттенок задаёт
+    // высота, которая приходит отдельным аргументом.
+    if (precipitation < 0.25 && temperature > 12.0) {
+        return desert;
+    }
+    return temperature < 14.0 ? mix(temperate, tropic, (temperature - 14.0) / 13.0)
+                              : mix(temperate, tropic, 1.0 - (temperature - 14.0) / 13.0);
+}
+
+// Лёд на суше: белый, но не чисто белый — с голубым оттенком, как настоящий
+// ледник в тени.
+glm::vec3 iceTint() { return glm::vec3{0.88f, 0.93f, 0.98f}; }
+
+// Снег/лёд на море: заметно площе, чем на суше, и с серым оттенком.
+glm::vec3 seaIceTint() { return glm::vec3{0.70f, 0.78f, 0.84f}; }
+
+glm::vec3 climateMapColor(const Climatology& climate, double wx, double wz, double height,
+                          double seaLevel, double oceanDepth, double maxLand) {
+    const double temperature = climate.temperatureAt(wx, wz);
+    const double precipitation = climate.precipitationAt(wx, wz);
+    const double ice = climate.iceAt(wx, wz);
+    const double seaIce = climate.seaIceAt(wx, wz);
+
+    if (height < seaLevel) {
+        // Океан: чем холоднее, тем светлее (полярный лёд), плюс оттенок по
+        // глубине, как в heightColor.
+        glm::vec3 water = oceanColor((seaLevel - height) / oceanDepth);
+        if (seaIce > 0.01) {
+            water = mix(water, seaIceTint(), seaIce);
+        }
+        return water;
+    }
+
+    glm::vec3 color = biomeTint(temperature, precipitation);
+    // Скалы на высоте: тот же приём, что и в heightColor, но мягче — на климатической
+    // карте высота не главный сюжет.
+    const double altitude = (height - seaLevel) / maxLand;
+    color = mix(color, glm::vec3{0.45f, 0.43f, 0.41f}, std::clamp((altitude - 0.55) / 0.45, 0.0, 1.0));
+    if (ice > 0.01) {
+        color = mix(color, iceTint(), ice);
+    }
+    return color;
+}
+
 }  // namespace
 
 WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed)
-    : WorldMap(terrain, seed, Config{}) {}
+    : WorldMap(terrain, seed, Config{}, nullptr) {}
 
 WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed, Config cfg)
-    : terrain_(terrain), seed_(seed), config_(cfg) {
+    : WorldMap(terrain, seed, std::move(cfg), nullptr) {}
+
+WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed,
+                   const Climatology* climatology)
+    : WorldMap(terrain, seed, Config{}, climatology) {}
+
+WorldMap::WorldMap(TerrainGenerator::Config terrain, std::uint32_t seed, Config cfg,
+                   const Climatology* climatology)
+    : terrain_(terrain), seed_(seed), config_(std::move(cfg)), climatology_(climatology) {
     pixels_.reserve(static_cast<std::size_t>(config_.width) * config_.height * 4);
 
     // Шов карты сомкнётся ТОЧНО, если extent*scale и extent*continentScale —
@@ -126,6 +220,13 @@ void WorldMap::generate() {
     const double oceanDepth = std::max(1e-3f, terrain_.geography.oceanDepth);
     const double maxLand = std::max(1e-3f, terrain_.geography.maxLandHeight);
 
+    // Климатическая карта и карта по высоте дают разные ответы на вопрос
+    // «суша здесь или нет», если уровень моря стал полем: подтопленный берег
+    // климатически океанический, но высотой всё ещё суша. Считаем обе маски
+    // и берём по климатической — иначе карта и ландшафт разойдутся.
+    const double climatologyBaseSea =
+        terrain_.geography.enabled ? terrain_.geography.seaLevel : 0.0;
+
     std::size_t landPixels = 0;
     for (std::size_t j = 0; j < height; ++j) {
         // v растёт по +Z, а изображение строится сверху вниз, поэтому первая
@@ -138,16 +239,30 @@ void WorldMap::generate() {
                                          static_cast<double>(width);
             // Ровно та же функция, что строит рельеф чанков, плюс период по X:
             // карта натягивается на сферу, где левый и правый край — один и тот
-            // же меридиан, поэтому рельеф по X обязан быть периодичным.
+            // же меридиан, поэтому рельеф по X обязан быть периодическим.
             const float h = TerrainGenerator::sampleHeightAt(terrain_, seed_, wx, wz,
                                                               config_.extent);
 
-            const glm::vec3 color = (h < seaLevel)
-                                        ? oceanColor((seaLevel - h) / oceanDepth)
-                                        : landColor((h - seaLevel) / maxLand);
-            if (h >= seaLevel) {
+            glm::vec3 color;
+            bool isLand;
+            if (climatology_ != nullptr) {
+                // Локальный уровень моря: в метрах, и в тех же единицах, что
+                // h. Тёплый океан выше холодного, поэтому берег от климата
+                // немного «плавает» — так же, как в ландшафте.
+                const double localSea = climatologyBaseSea +
+                                        climatology_->seaLevelWorldUnitsAt(wx, wz);
+                color = climateMapColor(*climatology_, wx, wz, h, localSea, oceanDepth,
+                                        maxLand);
+                isLand = h >= localSea;
+            } else {
+                color = (h < seaLevel) ? oceanColor((seaLevel - h) / oceanDepth)
+                                       : landColor((h - seaLevel) / maxLand);
+                isLand = h >= seaLevel;
+            }
+            if (isLand) {
                 ++landPixels;
             }
+
 
             const std::size_t idx = (j * width + i) * 4;
             pixels[idx + 0] = static_cast<std::uint8_t>(std::lround(color.r * 255.0f));

@@ -5,7 +5,10 @@
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <type_traits>
 
 #include <glm/glm.hpp>
@@ -25,6 +28,7 @@
 #include "world/chunk_manager.h"
 #include "world/world_map.h"
 #include "world/climate.h"
+#include "world/climatology.h"
 
 #ifndef ANTIWORLD_ASSETS_DIR
 #define ANTIWORLD_ASSETS_DIR "assets"
@@ -47,6 +51,17 @@ float chunkHeightAt(double globalX, double globalZ, void* userData) {
 static_assert(
     std::is_same_v<decltype(&chunkHeightAt), renderer::InstancedRenderer::HeightSampler>,
     "chunkHeightAt должен совпадать с InstancedRenderer::HeightSampler");
+
+// Один знак после запятой. std::to_string для double печатает шесть знаков и
+// научную нотацию, а в сводке мира это нечитаемо.
+std::string formatOne(double value) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(1) << value;
+    return stream.str();
+}
+
+// Процент одним знаком: «38.9», без знака процента (его ставит вызывающий).
+std::string formatPercent(double percent) { return formatOne(percent); }
 
 }  // namespace
 
@@ -78,9 +93,6 @@ int main() {
         physics::PhysicsSystem physicsSystem(physicsWorld);
         physics::PlayerController playerController;
 
-        // Климат мира: время года, сезон, температура и влажность.
-        world::Climate climate;
-
         // === Мир: чанковый стриминг вместо ландшафта 256x256 м ===
         //
         // ChunkManager владеет бесконечным миром: генерирует чанки в фоновом
@@ -94,6 +106,33 @@ int main() {
         // меши и коллайдеры.
         world::ChunkManager::Config chunkConfig;
         chunkConfig.viewDistance = 6144.0;  // ~6 чанков радиусом
+
+        // Климатология: статические поля мира (температура, осадки, влажность,
+        // материальность, лёд, уровень моря), посчитанные ОДИН раз по рельефу
+        // на сетке 512x512 — по той же функции высот и с тем же seed, что и сам
+        // мир, иначе карта покажет материки там, где их нет.
+        //
+        // Порядок объявления важен ВТОРОЙ раз: unique_ptr объявлен раньше
+        // climate, поэтому разрушается позже, и Climate ни разу не увидит
+        // освобождённую память. Спинлок-цикла здесь нет намеренно: поля
+        // статичны, а карта мира (world::WorldMap) читает их же ниже.
+        auto climatology =
+            world::Climatology::build(chunkConfig.terrain, chunkConfig.seed);
+        core::Logger::info("Climate: суша " +
+                           formatPercent(climatology->landFraction() * 100.0) + "%, средняя " +
+                           formatOne(climatology->meanTemperature()) + " C, ледники " +
+                           formatPercent(climatology->iceAreaFraction() * 100.0) + "% суши, " +
+                           "уровень моря: средний " +
+                           formatOne(climatology->seaLevelMean()) + " м, разброс " +
+                           formatOne(climatology->seaLevelRange()) + " м");
+
+        // Климат мира: время года, сезон, температура и влажность. С климатологией
+        // пространственная часть берётся из поля, а сам Climate отвечает за
+        // календарь, солнце и суточные колебания.
+        world::Climate climate;
+        climate.setClimatology(climatology.get());
+        climate.setBaseSeaLevel(chunkConfig.terrain.geography.seaLevel);
+
         world::ChunkManager chunks(vulkan, physicsWorld, world.registry(), &climate,
                                    chunkConfig);
         const double kViewDistance = chunkConfig.viewDistance;
@@ -187,7 +226,7 @@ int main() {
         // обычно, а M просто ничего не делает. Пиксели загружаются в текстуру
         // ОДИН раз, когда генерация закончилась.
         const auto startTime = std::chrono::steady_clock::now();
-        world::WorldMap worldMap(chunkConfig.terrain, chunkConfig.seed);
+        world::WorldMap worldMap(chunkConfig.terrain, chunkConfig.seed, climatology.get());
         bool mapOpen = false;
         // Смещение обзора планеты относительно игрока (радианы). Маркер игрока
         // при этом не уезжает с карты: смещается только точка, вставленная в

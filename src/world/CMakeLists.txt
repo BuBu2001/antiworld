@@ -5,6 +5,7 @@ add_library(world STATIC
     noise.cpp
     biome.cpp
     climate.cpp
+    climatology.cpp
     terrain_generator.cpp
     world_map.cpp
     terrain.cpp

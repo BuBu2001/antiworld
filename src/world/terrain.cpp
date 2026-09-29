@@ -91,6 +91,9 @@ Terrain::Terrain(renderer::VulkanBase& renderer, physics::PhysicsWorld& physicsW
     climate_->setWorldSize(heightmap_.sizeX(), heightmap_.sizeZ());
     climate_->setHeightSampler(
         [this](float worldX, float worldZ) { return heightmap_.sample(worldX, worldZ); });
+    // Базовая часть уровня моря: к ней прибавляется климатический сдвиг, и
+    // вместе они дают локальный уровень, по которому считается вода.
+    climate_->setBaseSeaLevel(heightmap_.seaLevel());
 
     // 4) Mesh ландшафта в renderer. Цвета берутся из биомов и пишутся в вершины
     //    (Vertex::color), шейдер берёт их как альбедо, а материал оставлен
@@ -188,23 +191,30 @@ renderer::FrameEnvironment Terrain::environment() const {
 BiomeBlend Terrain::biomeBlendAt(float worldX, float worldZ) const {
     return sampleBiome(heightAt(worldX, worldZ),
                        climate_->annualMeanTemperatureAt(worldX, worldZ),
-                       climate_->annualMeanHumidityAt(worldX, worldZ), biomeParams_);
+                       climate_->annualMeanHumidityAt(worldX, worldZ), biomeParams_,
+                       climate_->permanentIceAt(worldX, worldZ));
 }
 
 void Terrain::paintVertex(float worldX, float worldZ, float height,
                           renderer::Vertex& vertex) const {
     // Цвет и снежность считаются от среднегодовых температуры и влажности: иначе
     // смена сезона перекрашивала бы лес в тундру, а vertex buffer пришлось бы
-    // перезагружать каждый кадр.
+    // перезагружать каждый кадр. Лёд добавляется сверху как покрытие.
     const BiomeBlend blend = sampleBiome(height,
                                          climate_->annualMeanTemperatureAt(worldX, worldZ),
                                          climate_->annualMeanHumidityAt(worldX, worldZ),
-                                         biomeParams_);
+                                         biomeParams_,
+                                         climate_->permanentIceAt(worldX, worldZ));
     const glm::vec3 color = blend.color();
     vertex.color[0] = color.r;
     vertex.color[1] = color.g;
     vertex.color[2] = color.b;
     vertex.snowBias = blend.snowBias();
+    // Локальный уровень моря в этой точке: вода на карте высот — это флаг и
+    // уровень, посчитанные здесь, и шейдер обязан использовать те же числа.
+    const float seaLevel = climate_->seaLevelAt(worldX, worldZ);
+    vertex.water = height < seaLevel ? 1.0f : 0.0f;
+    vertex.localSeaLevel = seaLevel;
 }
 
 }  // namespace world

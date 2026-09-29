@@ -12,7 +12,12 @@ layout(location = 4) in float inSnowBias;
 // Считается на CPU один раз при генерации mesh из карты высот, потому что
 // «где океан» — это факт мира, а не визуальный эффект.
 layout(location = 5) in float inWater;
-layout(location = 6) in mat4 inModel;
+// Локальный уровень моря в этой точке, мировые единицы. Глубина воды и
+// прибойная полоса считаются по нему, а не по среднемировому уровню из UBO:
+// океан стоит выше в тропиках и ниже у полюсов, и по среднему уровню у
+// локально затопленного берега вода получалась бы «глубже», чем есть.
+layout(location = 6) in float inLocalSeaLevel;
+layout(location = 7) in mat4 inModel;
 
 layout(binding = 0) uniform UBO {
     mat4 viewProjection;
@@ -35,6 +40,9 @@ layout(location = 2) out float fragSnowBias;
 // океанской глади (см. inWater выше).
 layout(location = 3) out float fragWater;
 layout(location = 4) out vec3 fragWorldPosition;
+// Насколько точка ниже ЛОКАЛЬНОГО уровня моря. Отрицательное значение — суша
+// выше воды; по нему же считается прибойная полоса на берегу.
+layout(location = 5) out float fragWaterDepth;
 
 void main() {
     gl_Position = ubo.viewProjection * inModel * vec4(inPosition, 1.0);
@@ -63,4 +71,9 @@ void main() {
     fragSnowBias = inSnowBias;
     fragWater = inWater;
     fragWorldPosition = (inModel * vec4(inPosition, 1.0)).xyz;
+    // Глубина в ЛОКАЛЬНЫХ координатах вершины, а не в мировых: флаг воды и
+    // уровень моря заполняются из одной и той же карты высот в локальных
+    // единицах, поэтому сравнение обязано быть в тех же единицах, иначе
+    // floating origin (сдвиг матрицы модели) испортил бы границу воды.
+    fragWaterDepth = inLocalSeaLevel - inPosition.y;
 }

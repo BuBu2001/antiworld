@@ -732,6 +732,15 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     // Форма высоты живёт в TerrainGenerator::sampleHeightAt() — общей с
     // probeHeightAt() и с картой мира (world::WorldMap), поэтому проба спавна,
     // загруженный рельеф и карта физически не могут разойтись.
+    // Уровень моря в точке: базовая географическая константа плюс локальный
+    // климатический сдвиг. Именно поэтому «вода» считается по локальному
+    // уровню, а не по geography.seaLevel: тёплый океан стоит на десятки метров
+    // выше холодного, и берег от этого уезжает.
+    const float baseSeaLevel = geo.enabled ? geo.seaLevel : 0.0f;
+    const auto seaLevelAt = [this, baseSeaLevel](float wx, float wz) {
+        return climate_ != nullptr ? climate_->seaLevelAt(wx, wz) : baseSeaLevel;
+    };
+
     std::size_t waterNodes = 0;
     for (std::uint32_t z = 0; z < res; ++z) {
         for (std::uint32_t x = 0; x < res; ++x) {
@@ -741,7 +750,7 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
             const float h = TerrainGenerator::sampleHeightAt(config_.terrain, config_.seed,
                                                              wx, wz);
             heights[idx] = h;
-            if (h < geo.seaLevel) ++waterNodes;
+            if (h < seaLevelAt(static_cast<float>(wx), static_cast<float>(wz))) ++waterNodes;
         }
     }
     const float oceanFraction =
@@ -754,7 +763,10 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
 
     Heightmap& hm = data->heightmap;
     hm = Heightmap(res, res, cellSize, std::move(heights));
-    hm.setSeaLevel(geo.enabled ? geo.seaLevel : 0.0f);
+    // У Heightmap остаётся БАЗОВЫЙ уровень: он нужен как опорное значение для
+    // logs, physics и любых потребителей, которые не знают про климатологию.
+    // Покомпонентный уровень (у каждой вершины свой) живёт в вершинах mesh.
+    hm.setSeaLevel(baseSeaLevel);
     hm.setWaterFraction(oceanFraction);
     // Примечание: minHeight/maxHeight пересчитаны Heightmap из своих данных.
 
@@ -768,6 +780,10 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
     };
     const auto humidAt = [this](float wx, float wz) {
         return climate_ ? climate_->annualMeanHumidityAt(wx, wz) : 0.5f;
+    };
+    // Доля вечного льда: без климатологии ноль, то есть прежнее поведение.
+    const auto iceAt = [this](float wx, float wz) {
+        return climate_ ? climate_->permanentIceAt(wx, wz) : 0.0f;
     };
 
     // --- 3) Вершины mesh: позиция (локально, центр чанка = 0), нормаль,
@@ -806,16 +822,20 @@ std::unique_ptr<ChunkData> ChunkManager::generateChunkData(
             v.uv[0] = static_cast<float>(x) / static_cast<float>(res - 1);
             v.uv[1] = static_cast<float>(z) / static_cast<float>(res - 1);
 
-            const bool underwater = h < hm.seaLevel();
-            v.water = underwater ? 1.0f : 0.0f;
-
             const double wx = gx + static_cast<double>(x) * cellSize;
             const double wz = gz + static_cast<double>(z) * cellSize;
+            const float seaLevel = seaLevelAt(static_cast<float>(wx), static_cast<float>(wz));
+            const bool underwater = h < seaLevel;
+            v.water = underwater ? 1.0f : 0.0f;
+            v.localSeaLevel = seaLevel;
             const BiomeBlend blend = sampleBiome(h, tempAt(static_cast<float>(wx),
                                                            static_cast<float>(wz)),
-                                                 humidAt(static_cast<float>(wx),
-                                                         static_cast<float>(wz)),
-                                                 params);
+                                                  humidAt(static_cast<float>(wx),
+                                                          static_cast<float>(wz)),
+                                                  params,
+                                                  iceAt(static_cast<float>(wx),
+                                                        static_cast<float>(wz)));
+
             const glm::vec3 color = blend.color();
             v.color[0] = color.r;
             v.color[1] = color.g;

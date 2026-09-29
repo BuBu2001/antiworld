@@ -10,16 +10,18 @@
 // до середины весны, а у пустыни bias = 0 и снега не бывает вовсе.
 //
 // Вода — часть ГЕОГРАФИИ: вершина несёт флаг water (1 — под уровнем моря),
-// а уровень моря приходит из UBO. Там, где terrain ниже уровня моря, поверх
-// рисуется водная гладь ровно на seaLevel: с волнами, прозрачностью над
-// мелководьем и отражением неба. Суша под водой остаётся видна сквозь
-// тонкий слой — как в реальном море у берега.
+// а глубина приходит из вершинного шейдера как localSeaLevel - y, то есть по
+// ЛОКАЛЬНОМУ уровню моря. Там, где terrain ниже этого уровня, поверх рисуется
+// водная гладь ровно на нём: с волнами, прозрачностью над мелководьем и
+// отражением неба. Суша под водой остаётся видна сквозь тонкий слой — как в
+// реальном море у берега.
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec3 fragAlbedo;
 layout(location = 2) in float fragSnowBias;
 layout(location = 3) in float fragWater;
 layout(location = 4) in vec3 fragWorldPosition;
+layout(location = 5) in float fragWaterDepth;
 
 layout(binding = 0) uniform UBO {
     mat4 viewProjection;
@@ -43,7 +45,9 @@ void main() {
     const vec3 sunDirection = normalize(ubo.sunDirection.xyz);
     const float frost = ubo.environment.x;
     const float ambient = ubo.environment.y;
-    const float seaLevel = ubo.environment.z;
+    // environment.z (seaLevel) здесь НЕ используется: уровень моря стал полем,
+    // и локальное значение приходит из вершины. В UBO слот оставлен, чтобы не
+    // сдвигать layout и не ломать terrain/tree/water шейдеры.
     const float hasWater = ubo.waterFlags.x;
 
     // Порог снега: frost + snowBias > 1. Полоса перехода 0.25 по frost
@@ -64,12 +68,13 @@ void main() {
     vec3 lit = albedo * (ambient + diffuse * ubo.sunDirection.w);
 
     // --- Океан ---
-    // Гладь только там, где география говорит «вода» И рельеф реально ниже
-    // уровня моря (оба условия нужны: флаг задаёт биом-океан, а высота —
-    // корректную линию берега против плавных переходов смеси биомов).
-    if (hasWater > 0.5 && fragWater > 0.5 && fragWorldPosition.y < seaLevel) {
+    // Гладь только там, где география говорит «вода» (флаг) И точка ниже
+    // ЛОКАЛЬНОГО уровня моря (fragWaterDepth > 0). Оба условия нужны: флаг
+    // задаёт биом-океан, глубина — корректную линию берега против плавных
+    // переходов смеси биомов.
+    if (hasWater > 0.5 && fragWater > 0.5 && fragWaterDepth > 0.0f) {
         // Глубина в точке: 0 у берега, 1 на максимальной глубине океана.
-        const float depth = clamp((seaLevel - fragWorldPosition.y) / 12.0f, 0.0f, 1.0f);
+        const float depth = clamp(fragWaterDepth / 12.0f, 0.0f, 1.0f);
 
         // Волны: две синусоидальные ряби в мировых координатах + нормаль,
         // наклонённая по их градиенту. Это дешёвая имитация, но вода сразу
@@ -92,7 +97,7 @@ void main() {
         vec3 water = waterColor * skyLike + vec3(0.9f, 0.95f, 1.0f) * glint *
                      ubo.sunDirection.w;
         // Пена у самого берега.
-        const float shore = 1.0f - smoothstep(0.0f, 1.2f, seaLevel - fragWorldPosition.y);
+        const float shore = 1.0f - smoothstep(0.0f, 1.2f, fragWaterDepth);
         water = mix(water, vec3(0.85f, 0.9f, 0.95f), shore * 0.35f);
 
         // Смешивание с дном: чем мельче, тем сильнее видно сушу под водой.

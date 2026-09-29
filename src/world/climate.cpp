@@ -4,6 +4,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "world/climatology.h"
+
 namespace world {
 
 namespace {
@@ -100,6 +102,20 @@ float Climate::seasonalOffset(float yearPhase) const noexcept {
            std::cos(kTwoPi * (wrapPhase(yearPhase) - kMidSummer));
 }
 
+float Climate::seasonalOffsetAt(float x, float z, float yearPhase) const {
+    // Тот же косинус, но полуразмах берётся в точке: с климатологией amplitude
+    // это local-величина (Сибирь против побережья), без неё — общая настройка.
+    return seasonalAmplitudeAt(x, z) *
+           std::cos(kTwoPi * (wrapPhase(yearPhase) - kMidSummer));
+}
+
+float Climate::seasonalAmplitudeAt(float x, float z) const {
+    if (climatology_ != nullptr) {
+        return static_cast<float>(climatology_->seasonalSwingAt(x, z));
+    }
+    return config_.seasonalAmplitude;
+}
+
 float Climate::latitudeFactor(float x) const noexcept {
     if (worldSizeX_ <= 0.0f) {
         return 0.0f;
@@ -130,6 +146,12 @@ float Climate::temperature() const noexcept {
 }
 
 float Climate::annualMeanTemperatureAt(float x, float z) const {
+    if (climatology_ != nullptr) {
+        // Климатология уже учла и широту, и высоту, и материальность, и тёплые
+        // течения. Повторно вычитать высоту нельзя: получилось бы двойное
+        // охлаждение вершин.
+        return static_cast<float>(climatology_->temperatureAt(x, z));
+    }
     // Среднегодовая = база + широта − высотное охлаждение. Сезонного и
     // суточного слагаемых нет намеренно: по этой величине выбирается биом,
     // и он не должен меняться вместе со временем года.
@@ -138,7 +160,7 @@ float Climate::annualMeanTemperatureAt(float x, float z) const {
 }
 
 float Climate::temperatureAt(float x, float z) const {
-    return annualMeanTemperatureAt(x, z) + seasonalOffset(yearPhase_) + diurnalOffset();
+    return annualMeanTemperatureAt(x, z) + seasonalOffsetAt(x, z, yearPhase_) + diurnalOffset();
 }
 
 float Climate::temperatureAt(float x, float z, Season season) const {
@@ -146,7 +168,7 @@ float Climate::temperatureAt(float x, float z, Season season) const {
     // от того, на каком именно моменте сезона мы спрашиваем.
     const float phase = (static_cast<float>(static_cast<std::size_t>(season)) + 0.5f) /
                         static_cast<float>(kSeasonCount);
-    return annualMeanTemperatureAt(x, z) + seasonalOffset(phase) + diurnalOffset();
+    return annualMeanTemperatureAt(x, z) + seasonalOffsetAt(x, z, phase) + diurnalOffset();
 }
 
 float Climate::humidity() const noexcept {
@@ -158,6 +180,9 @@ float Climate::humidity() const noexcept {
 }
 
 float Climate::annualMeanHumidityAt(float x, float z) const {
+    if (climatology_ != nullptr) {
+        return static_cast<float>(climatology_->humidityAt(x, z));
+    }
     // Влажность зависит от положения (суше на востоке — там жарко и сухо) и от
     // высоты (на вершинах суше). Сезонной составляющей нет намеренно: биом
     // выбирается по среднегодовым величинам, иначе лес летом превращался бы в
@@ -170,13 +195,13 @@ float Climate::annualMeanHumidityAt(float x, float z) const {
 }
 
 float Climate::humidityAt(float x, float z) const {
-    // Та же пространственная картина плюс сезонная волна: летом суше, зимой
-    // влажнее. Основа берётся у среднегодовой функции, чтобы пространственная
-    // часть не дублировалась.
-    const float annualMean = annualMeanHumidityAt(x, z);
-    return std::clamp(annualMean +
-                          (humidity() - std::clamp(config_.baseHumidity, 0.0f, 1.0f)),
-                      0.0f, 1.0f);
+    // Сезонная волна одна на всю планету (летом суше, зимой влажнее), а
+    // пространственная часть берётся из той же среднегодовой функции, чтобы не
+    // дублировалась. С климатологией база — поле, поэтому амплитуда волны
+    // берётся из конфига напрямую, а не как разность с humidity().
+    const float wave = config_.humiditySeasonal *
+                       std::cos(kTwoPi * (yearPhase_ - kMidSummer));
+    return std::clamp(annualMeanHumidityAt(x, z) + wave, 0.0f, 1.0f);
 }
 
 float Climate::frost() const noexcept {
@@ -199,6 +224,67 @@ void Climate::setWorldSize(float sizeX, float sizeZ) {
     }
     worldSizeX_ = std::max(0.0f, sizeX);
     worldSizeZ_ = std::max(0.0f, sizeZ);
+}
+
+// --- Климатология ---
+
+void Climate::setClimatology(const Climatology* climatology) {
+    // Обнулить можно: тогда Climate снова считает по старым формулам. Это нужно
+    // при разрушении мира, чтобы висящий указатель никогда не был прочитан.
+    climatology_ = climatology;
+}
+
+float Climate::precipitationAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->precipitationAt(x, z))
+               : 0.0f;
+}
+
+float Climate::precipitationMillimetersAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->precipitationMillimetersAt(x, z))
+               : 0.0f;
+}
+
+float Climate::continentalityAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->continentalityAt(x, z))
+               : 0.0f;
+}
+
+float Climate::seaLevelOffsetAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->seaLevelWorldUnitsAt(x, z))
+               : 0.0f;
+}
+
+float Climate::seaLevelAt(float x, float z) const {
+    return baseSeaLevel_ + seaLevelOffsetAt(x, z);
+}
+
+float Climate::permanentIceAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->iceAt(x, z))
+               : 0.0f;
+}
+
+float Climate::seaIceAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->seaIceAt(x, z))
+               : 0.0f;
+}
+
+float Climate::snowLineAt(float x, float z) const {
+    return climatology_ != nullptr
+               ? static_cast<float>(climatology_->snowLineWorldUnitsAt(x, z))
+               : 0.0f;
+}
+
+float Climate::meanAnnualTemperature() const noexcept {
+    if (climatology_ != nullptr) {
+        return static_cast<float>(climatology_->meanTemperature());
+    }
+    return config_.baseTemperature;
 }
 
 // --- Освещение ---

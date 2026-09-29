@@ -16,6 +16,7 @@
 //   * sampleBiome()   — полная смесь BiomeBlend (для цвета и снега);
 //   * biomeColor()    — базовый цвет одного биома.
 
+#include <algorithm>
 #include <cstddef>
 
 #include <glm/glm.hpp>
@@ -87,6 +88,11 @@ struct BiomeParams {
     // индикатора (холод, жара, сухость) дали нули и нормировать нечего.
     // Заодно слегка окрашивает края пустынь и гор в зелень.
     float forestFloor{0.04f};
+
+    // --- Лёд ---
+    // Ледник — это не биом, а покрытие: он лежит ПОВЕРХ пустыни, леса и гор
+    // одинаково (Гренландия, Памир). Поэтому лёд не добавляет веса ни одному
+    // биому, а подмешивается к цвету и снежности отдельно.
 };
 
 // Смесь биомов в одной точке ландшафта: веса (в сумме 1), производный цвет
@@ -114,9 +120,16 @@ public:
     float snowBias() const { return snowBias_; }
     void setSnowBias(float value) { snowBias_ = value; }
 
+    // Лёд поверх смеси, 0..1: подмешивается к цвету и поднимает снежность до
+    // единицы (на леднике снег лежит круглый год). Вынесено отдельно от весов
+    // биомов, потому что ледник не «заменяет» биом, а покрывает его.
+    float ice() const { return ice_; }
+    void setIce(float value) { ice_ = std::clamp(value, 0.0f, 1.0f); }
+
 private:
     float weights_[kBiomeCount]{1.0f, 0.0f, 0.0f, 0.0f};
     float snowBias_{0.0f};
+    float ice_{0.0f};
 };
 
 // Доминирующий биом точки по высоте, среднегодовой температуре и влажности.
@@ -125,8 +138,11 @@ Biome getBiome(float height, float temperature, float humidity,
                const BiomeParams& params = BiomeParams{});
 
 // Плавная смесь биомов: веса, цвет и снежность. Основная функция раскраски.
+// ice — доля вечного льда 0..1 (world::Climatology::iceAt). Нужен, чтобы
+// ледник был белым поверх любого биома и держал снег круглый год; без него
+// поведение прежнее.
 BiomeBlend sampleBiome(float height, float temperature, float humidity,
-                       const BiomeParams& params = BiomeParams{});
+                       const BiomeParams& params = BiomeParams{}, float ice = 0.0f);
 
 // Пересчитывает высотные пороги params под фактический диапазон карты высот
 // [minHeight, maxHeight], используя mountainStartFraction/mountainEndFraction.
