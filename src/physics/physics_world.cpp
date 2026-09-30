@@ -25,6 +25,7 @@
 #include <Jolt/Physics/Collision/RayCast.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/CylinderShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
 #include <Jolt/Physics/Collision/Shape/Shape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -286,6 +287,31 @@ PhysicsWorld::BodyHandle PhysicsWorld::createStaticBox(
     }
 
     JPH::Ref<JPH::Shape> shape = new JPH::BoxShape(toJoltVec3(halfExtents));
+    return impl_->createShape(
+        shape.GetPtr(),
+        position,
+        rotation,
+        JPH::EMotionType::Static,
+        kStaticObjectLayer,
+        JPH::EActivation::DontActivate
+    );
+}
+
+PhysicsWorld::BodyHandle PhysicsWorld::createStaticCylinder(
+    float radius,
+    float halfHeight,
+    const glm::vec3& position,
+    const glm::quat& rotation
+) {
+    if (!std::isfinite(radius) || radius <= 0.0f || !std::isfinite(halfHeight) ||
+        halfHeight <= 0.0f || !isFinite(position) || !isFinite(rotation)) {
+        throw std::invalid_argument("PhysicsWorld: invalid static cylinder");
+    }
+
+    // Именно CylinderShape, а не BoxShape по габаритам: у коробки на
+    // скруглённых углах игрок «залипал» бы на ребре треугольной сетки, а у
+    // цилиндра поверхность круговая и стыков с гранями рельефа нет.
+    JPH::Ref<JPH::Shape> shape = new JPH::CylinderShape(halfHeight, radius);
     return impl_->createShape(
         shape.GetPtr(),
         position,

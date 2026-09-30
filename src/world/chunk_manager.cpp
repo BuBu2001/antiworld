@@ -284,6 +284,16 @@ void ChunkManager::applyOriginShift(const awdm::dvec3& delta) {
         // Transform в ECS.
         if (chunk.entity != entt::null && registry_.all_of<ecs::Transform>(chunk.entity)) {
             registry_.get<ecs::Transform>(chunk.entity).position = chunk.localCenter;
+            // AABB пересобираем из нового localCenter. Если этого не сделать,
+            // после сдвига origin все AABB останутся в старых координатах и
+            // intersectAABB вернёт false — чанки исчезнут из кадра до
+            // следующей загрузки. Сдвиг origin бывает при ходьбе, так что
+            // это не разовый случай, а каждые 1000 м пути.
+            if (auto* bounds = registry_.try_get<ecs::Bounds>(chunk.entity);
+                bounds != nullptr) {
+                bounds->local.min = awdm::dvec3{chunk.localCenter.x, chunk.localCenter.y, chunk.localCenter.z} + chunk.localMin;
+                bounds->local.max = awdm::dvec3{chunk.localCenter.x, chunk.localCenter.y, chunk.localCenter.z} + chunk.localMax;
+            }
         }
         // Тело Jolt (главный поток — здесь мы и так в главном).
         if (physics_.isBodyValid(chunk.body)) {
@@ -442,6 +452,33 @@ void ChunkManager::loadChunkToGpu(ChunkIt it, std::unique_ptr<ChunkData> data) {
     registry_.emplace<ecs::Transform>(chunk.entity, transform);
     registry_.emplace<ecs::MeshRenderer>(chunk.entity, ecs::MeshRenderer{chunk.mesh});
     registry_.emplace<ecs::RigidBody>(chunk.entity, ecs::RigidBody{chunk.body});
+
+    // Габариты чанка для отсечения по пирамиде видимости. Считаем ЗДЕСЬ, из
+    // вершин модели, потому что через 20 строк они освобождаются ради RAM.
+    //
+    // Вершины локальны относительно центра чанка (маленькие — чтобы float
+    // не терял точность), а сущность стоит в chunk.localCenter, то есть
+    // относительно floating origin. Frustum в main.cpp строится в этом же
+    // локальном фрейме, поэтому итоговый AABB — localCenter + границы
+    // вершин, и он сразу в double, без обратного пересчёта.
+    if (!data->model.vertices.empty()) {
+        glm::vec3 lo{1e30f, 1e30f, 1e30f};
+        glm::vec3 hi{-1e30f, -1e30f, -1e30f};
+        for (const auto& vertex : data->model.vertices) {
+            const glm::vec3 p{vertex.position[0], vertex.position[1], vertex.position[2]};
+            lo = glm::min(lo, p);
+            hi = glm::max(hi, p);
+        }
+        // Границы относительно центра — переживут сдвиг floating origin.
+        chunk.localMin = awdm::dvec3{lo.x, lo.y, lo.z};
+        chunk.localMax = awdm::dvec3{hi.x, hi.y, hi.z};
+        // Абсолютный AABB собираем здесь же: сущность уже создана, handle
+        // переживёт последующий move в chunksLru_.
+        ecs::Bounds bounds;
+        bounds.local.min = awdm::dvec3{chunk.localCenter.x, chunk.localCenter.y, chunk.localCenter.z} + chunk.localMin;
+        bounds.local.max = awdm::dvec3{chunk.localCenter.x, chunk.localCenter.y, chunk.localCenter.z} + chunk.localMax;
+        registry_.emplace<ecs::Bounds>(chunk.entity, bounds);
+    }
 
     residentVertices_.fetch_add(data->model.vertices.size(), std::memory_order_relaxed);
     loadsTotal_.fetch_add(1, std::memory_order_relaxed);

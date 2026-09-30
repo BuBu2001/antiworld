@@ -16,9 +16,11 @@ void MovementSystem::update(entt::registry& registry, float deltaTime) {
     }
 }
 
-void RenderSystem::collect(entt::registry& registry,
-                           std::vector<renderer::DrawData>& output) const {
+void RenderSystem::collect(entt::registry& registry, const renderer::Frustum& frustum,
+                           std::vector<renderer::DrawData>& output, CullStats* stats) const {
     output.clear();
+    CullStats local;
+    CullStats& counters = stats != nullptr ? *stats : local;
 
     auto view = registry.view<const Transform, const MeshRenderer>();
     for (const entt::entity entity : view) {
@@ -27,7 +29,19 @@ void RenderSystem::collect(entt::registry& registry,
         if (meshRenderer.handle == nullptr) {
             continue;
         }
+        // Отсечение по пирамиде видимости. Без Bounds сущность проходит
+        // всегда: чанки ради этого габариты и держат, а агентов (десятки
+        // штук) дешевле отправить, чем проверять.
+        if (const auto* bounds = registry.try_get<const Bounds>(entity);
+            bounds != nullptr) {
+            ++counters.tested;
+            if (!frustum.intersectsAABB(bounds->local)) {
+                ++counters.culled;
+                continue;
+            }
+        }
         output.push_back({meshRenderer.handle, transform.toMatrix()});
+        ++counters.submitted;
     }
 }
 

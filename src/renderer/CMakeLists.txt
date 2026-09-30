@@ -26,6 +26,8 @@ set(SHADER_SOURCES
     ${CMAKE_SOURCE_DIR}/shaders/sky.frag
     ${CMAKE_SOURCE_DIR}/shaders/map.vert
     ${CMAKE_SOURCE_DIR}/shaders/map.frag
+    ${CMAKE_SOURCE_DIR}/shaders/hud.vert
+    ${CMAKE_SOURCE_DIR}/shaders/hud.frag
 )
 
 set(SHADER_OUTPUTS)
@@ -52,6 +54,8 @@ add_library(renderer STATIC
     vertex_buffer.cpp
     texture.cpp
     world_map_pass.cpp
+    hud_pass.cpp
+    hud_font.cpp
     model_loader.cpp
     mesh.cpp
     pipeline.cpp
@@ -59,6 +63,7 @@ add_library(renderer STATIC
     lod_manager.cpp
     frustum_culling.cpp
     instanced_renderer.cpp
+    vegetation_geometry.cpp
 )
 
 # Шейдеры собираются до/вместе с библиотекой.

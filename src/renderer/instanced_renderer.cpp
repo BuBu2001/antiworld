@@ -7,6 +7,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "core/logger.h"
+#include "renderer/vegetation_geometry.h"
 #include "renderer/vulkan_base.h"
 
 namespace renderer {
@@ -78,8 +79,47 @@ std::uint16_t InstancedRenderer::addPrimitive(VulkanBase& renderer,
         throw std::invalid_argument("InstancedRenderer: пустая геометрия примитива");
     }
     Mesh* mesh = renderer.createMesh(geometry);
-    primitives_.push_back({mesh, static_cast<std::uint32_t>(geometry.indices.size() / 3)});
+    Primitive primitive;
+    primitive.mesh = mesh;
+    primitive.triangles = static_cast<std::uint32_t>(geometry.indices.size() / 3);
+    // Габариты берём из реальных вершин. Считать их «на глаз» по высоте вида
+    // нельзя: размах кроны и высота ствола независимы, и ошибка в 1.5 м
+    // означает либо обрезанную крону, либо вдвое больше лишней работы в
+    // culling'е на каждом кадре.
+    const vegetation::Bounds box = vegetation::boundsOf(geometry);
+    primitive.boundCenter = 0.5f * (box.min + box.max);
+    const glm::vec3 half = 0.5f * (box.max - box.min);
+    // Сфера вокруг AABB: half-длина диагонали. Для сплюснутой кроны сфера
+    // заметно больше нужного AABB, поэтому для culling'а держим и сам AABB.
+    primitive.boundRadius = glm::length(half);
+    primitives_.push_back(primitive);
     return static_cast<std::uint16_t>(primitives_.size() - 1);
+}
+
+void InstancedRenderer::addObjectNoReserve(const InstancedObject& object) {
+    // Порциями по 4096: рассев добавляет десятки тысяч объектов, и точная
+    // верхняя оценка потребовала бы второй выборки по всей площади.
+    if (objects_.size() == objects_.capacity()) {
+        objects_.reserve(objects_.size() + std::max<std::size_t>(4096, objects_.size() / 2));
+    }
+    objects_.push_back(object);
+    sortDirty_ = true;
+}
+
+void InstancedRenderer::clearObjects() {
+    objects_.clear();
+    objectCapacityHint_ = 0;
+    // Сортировка по примитиву стала неверной: индексы указывают на старые
+    // объекты. ensureSorted() пересоберёт её, но флаг нужно сбросить явно —
+    // иначе collectDraws() на пустом пуле вернёт пустой результат без
+    // ошибки, а первый же новый объект отрисуется не в своей группе.
+    sortDirty_ = true;
+    sortScratch_.clear();
+}
+
+float InstancedRenderer::primitiveRadius(std::uint16_t primitive) const noexcept {
+    if (primitive >= primitives_.size()) return 1.0f;
+    return primitives_[primitive].boundRadius;
 }
 
 void InstancedRenderer::destroy(VulkanBase& renderer) {
@@ -121,9 +161,12 @@ std::size_t InstancedRenderer::spawnTrees(VulkanBase& renderer, std::size_t coun
         addPrimitive(renderer, makeStickTreeGeometry());
     }
     const std::uint16_t treePrimitive = 0;
-    // Bounding radius юнит-дерева (ствол+крона): по высоте ~4.1 м, по ширине
-    // ~1.13 м -> консервативно берём описывающую сферу вокруг центра формы.
-    constexpr float kUnitRadius = 2.6f;
+    // Габаритный радиус юнит-дерева берём у примитива: он посчитан из
+    // геометрии в addPrimitive(). Константа «2.6 м» здесь означала сферу
+    // вокруг земли, а дерево высотой 4.1 м с основанием в Y=0 в неё не
+    // помещалось — верхушка кроны выпадала из culling'а у самой камеры, и
+    // деревья исчезали ровно тогда, когда игрок подходил к ним вплотную.
+    const float kUnitRadius = primitiveRadius(treePrimitive);
 
     // Сетка размещения: ceil(sqrt(count)) x то же, шаг = размер области / N.
     const auto side = static_cast<std::size_t>(std::ceil(std::sqrt(static_cast<double>(count))));
@@ -200,21 +243,38 @@ InstancedRenderer::CullStats InstancedRenderer::collectDraws(
     out.reserve(startOffset + objects_.size());
     for (const std::pair<std::uint16_t, std::uint32_t>& entry : sortScratch_) {
         const InstancedObject& object = objects_[entry.second];
+        const Primitive& primitive = primitives_[entry.first];
+        if (primitive.mesh == nullptr) continue;
         // AABB в ЛОКАЛЬНЫХ координатах — ровно в тех же, что и плоскости
         // frustum (view-матрица камеры строится по position() = global - origin).
         // Считаем разность в double и только её сужаем: иначе на больших
         // расстояниях AABB «съезжает» на метры.
         const awdm::dvec3 local = awdm::toLocal(object.globalPosition, origin);
-        // Консервативный AABB: сфера радиуса radius*scale вокруг позиции
-        // (примитив центрирован, поворот по Y и масштаб учтены в radius).
-        const double r = static_cast<double>(object.radius);
-        const AABB box{awdm::dvec3{local.x - r, local.y - r, local.z - r},
-                       awdm::dvec3{local.x + r, local.y + r, local.z + r}};
+        // Габариты берём из ГЕОМЕТРИИ примитива, а не из object.radius,
+        // выставленного при рассеве: примитив — источник истины, и
+        // object.radius может разойтись с ним после смены геометрии.
+        const double s = static_cast<double>(object.scale);
+        // Центр габаритов повёрнут тем же yaw, что и инстанс: при повороте
+        // вокруг Y смещение (cx, cy, cz) идёт в (cx·cos+cz·sin, cy,
+        // -cx·sin+cz·cos). Поворот нужен, потому что крона смещена от оси
+        // ствола, и без него AABB уезжал бы на ширину кроны.
+        const float c = std::cos(object.yawRadians);
+        const float sn = std::sin(object.yawRadians);
+        const awdm::dvec3 center{local.x + s * static_cast<double>(primitive.boundCenter.x * c +
+                                                                   primitive.boundCenter.z * sn),
+                                 local.y + s * static_cast<double>(primitive.boundCenter.y),
+                                 local.z + s * static_cast<double>(-primitive.boundCenter.x * sn +
+                                                                    primitive.boundCenter.z * c)};
+        const double r = static_cast<double>(primitive.boundRadius) * s;
+        const AABB box{awdm::dvec3{center.x - r, center.y - r, center.z - r},
+                       awdm::dvec3{center.x + r, center.y + r, center.z + r}};
         if (!frustum.intersectsAABB(box)) continue;
-        const Primitive& primitive = primitives_[entry.first];
-        if (primitive.mesh == nullptr) continue;
-        out.push_back({primitive.mesh, instanceMatrix(object, origin), /*lod=*/0});
-        ++stats.visible;    }
+        // tint (малое отклонение от единицы) несёт климат точки: сухой склон
+        // желтее, влажная тайга синее. У рельефа и прочих объектов, tint не
+        // задающих, он остаётся единичным — см. InstancedObject::colorTint.
+        out.push_back({primitive.mesh, instanceMatrix(object, origin), object.colorTint, /*lod=*/0});
+        ++stats.visible;
+    }
 
     // Число будущих draw calls = число разных примитивов среди принятых
     // (группы подряд идут: сортировка гарантирует смежность одного mesh).

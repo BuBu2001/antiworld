@@ -18,6 +18,10 @@ layout(location = 5) in float inWater;
 // локально затопленного берега вода получалась бы «глубже», чем есть.
 layout(location = 6) in float inLocalSeaLevel;
 layout(location = 7) in mat4 inModel;
+// Множитель альбедо инстанса (renderer::InstanceData::tint). Вид и вариант
+// задают форму растения, а этот атрибут — оттенок: сухой склон желтее,
+// затенённая тайга синее. Для рельефа и прочих объектов он равен (1,1,1).
+layout(location = 11) in vec4 inTint;
 
 layout(binding = 0) uniform UBO {
     mat4 viewProjection;
@@ -79,13 +83,17 @@ void main() {
         const float cross = cos(t * 1.7 + phaseZ * 1.1);
         // Порывы: медленная низкочастотная модуляция амплитуды.
         const float gust = 0.65 + 0.35 * sin(t * 0.37 + phaseZ * 0.13);
-        const float amount = inUV.x * lever * ubo.wind.y * gust;
-        // Смещение задаём в МИРОВЫХ метрах, поэтому делим на масштаб
-        // инстанса: иначе трава с масштабом 0.3 еле заметно шевелилась бы,
-        // а дерево с масштабом 1.6 заваливалось. inModel = T·R·S, поэтому
-        // длина нулевого столбца и есть масштаб.
-        const float modelScale = max(length(inModel[0].xyz), 1e-4);
-        localPos.xz += vec2(sway, cross * 0.7) * (amount / modelScale);
+        // Смещение задаём в ЛОКАЛЬНЫХ единицах растения: ниже localPos
+        // умножается на inModel, поэтому в мировых метрах отклонение
+        // само пропорционально высоте растения.
+        //
+        // ДЕЛИТЬ на масштаб нельзя — это ровно тот случай, когда «на глаз
+        // правильная» правка даёт обратный эффект: у травы масштаб ~0.4, и
+        // после деления её макушка улетала на метр в сторону при высоте
+        // самого пучка 0.4 м, то есть трава размазывалась шире себя.
+        const float kMaxBend = 0.18f;  // макушка отклоняется не более ~18% высоты
+        const float bend = inUV.x * lever * ubo.wind.y * gust * kMaxBend;
+        localPos.xz += vec2(sway, cross * 0.7) * bend;
     }
 
     gl_Position = ubo.viewProjection * inModel * vec4(localPos, 1.0);
@@ -110,7 +118,7 @@ void main() {
         transformedNormal = inNormal;
     }
     fragNormal = normalize(transformedNormal);
-    fragAlbedo = inColor;
+    fragAlbedo = inColor * inTint.rgb;
     fragSnowBias = inSnowBias;
     fragWater = inWater;
     fragWorldPosition = (inModel * vec4(localPos, 1.0)).xyz;

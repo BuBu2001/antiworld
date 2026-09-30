@@ -13,6 +13,17 @@ namespace renderer {
 class GraphicsPipeline;
 class RenderPass;
 
+// Оверлей, который рисуется последним поверх уже готового кадра (сейчас —
+// счётчик FPS). Необязателен: при pipeline == nullptr ничего не рисуется.
+// Вынесен в структуру, чтобы не плодить параметры у record().
+struct SceneOverlay {
+    GraphicsPipeline* pipeline = nullptr;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    // Прямоугольник растеризации. Без него полноэкранный треугольник прогонял
+    // бы фрагментный шейдер по всем пикселям кадра ради сотни пикселей текста.
+    VkRect2D scissor{{0, 0}, {0, 0}};
+};
+
 // Набор командных буферов (по одному на кадр в полёте) с записью отрисовки
 // mesh: begin render pass (очистка) -> bind pipeline -> bind buffers -> draw -> end render pass.
 class CommandBuffers {
@@ -47,12 +58,17 @@ public:
     // поэтому порядок «сначала сцена, потом небо» не нужен — нужен лишь
     // порядок записей, чтобы небо перекрывало там, где сцена не записала
     // глубину, и не перекрывало ничего лишнего.
+    //
+    // overlay (pipeline != nullptr) — оверлей поверх всего: HUD-счётчик FPS.
+    // Рисуется после неба, со своим набором дескрипторов и со scissor,
+    // ограничивающим растеризацию его прямоугольником.
     void record(VkCommandBuffer commandBuffer, const RenderPass& renderPass,
                 size_t framebufferIndex, VkExtent2D extent,
                 GraphicsPipeline& pipeline, std::span<const MeshDraw> meshDraws,
                 VkClearColorValue clearColor, VkDescriptorSet descriptorSet,
                 VkBuffer instanceBuffer, bool fullscreen = false,
-                GraphicsPipeline* skyPipeline = nullptr);
+                GraphicsPipeline* skyPipeline = nullptr,
+                const SceneOverlay& overlay = {});
 
     VkCommandBuffer commandBuffer(uint32_t index) const { return commandBuffers_[index]; }
     // Пул для одноразовых command buffer'ов (загрузка текстур). Основной пул

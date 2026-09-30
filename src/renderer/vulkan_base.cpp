@@ -163,6 +163,14 @@ void VulkanBase::init(core::Window& window) {
     const QueueFamilyIndices indices = findQueueFamilies(physicalDevice_);
     commandBuffers_.init(device_, *indices.graphics, kMaxFramesInFlight);
 
+    // HUD инициализируется именно здесь, а не в createRenderTargets(): атлас
+    // шрифта грузится через одноразовый command buffer, поэтому пул command
+    // buffers к этому моменту должен уже существовать. В createRenderTargets
+    // он создаётся двумя строками ниже, и vkAllocateCommandBuffers на
+    // VK_NULL_HANDLE роняет процесс.
+    hudPass_.init(device_, physicalDevice_, commandBuffers_.commandPool(), graphicsQueue_,
+                  renderPass_.handle(), kMaxFramesInFlight);
+
     core::Logger::info("Vulkan: инициализация завершена");
 }
 
@@ -241,6 +249,7 @@ void VulkanBase::createRenderTargets() {
 
 void VulkanBase::destroyRenderTargets() {
     worldMapPass_.destroy();
+    hudPass_.destroy();
     skyPipeline_.destroy();
     pipeline_.destroy();
     uniformBuffer_.destroy();
@@ -291,9 +300,9 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
               });
 
     meshDrawScratch_.clear();
-    modelMatrixScratch_.clear();
+    instanceScratch_.clear();
     meshDrawScratch_.reserve(sortScratch_.size());
-    modelMatrixScratch_.reserve(sortScratch_.size());
+    instanceScratch_.reserve(sortScratch_.size());
     for (const DrawData& data : sortScratch_) {
         if (!ownsMesh(data.mesh)) {
             throw std::runtime_error("Vulkan: mesh handle не принадлежит renderer");
@@ -304,10 +313,10 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
             ++meshDrawScratch_.back().instanceCount;
         } else {
             meshDrawScratch_.push_back({data.mesh,
-                                        static_cast<uint32_t>(modelMatrixScratch_.size()), 1,
+                                        static_cast<uint32_t>(instanceScratch_.size()), 1,
                                         data.lod});
         }
-        modelMatrixScratch_.push_back(data.model);
+        instanceScratch_.push_back(InstanceData{data.model, glm::vec4(data.tint, 1.0f)});
     }
     const std::span<const MeshDraw> meshDraws{meshDrawScratch_};
 
@@ -318,16 +327,16 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     const uint32_t imageIndex = acquired.imageIndex;
 
     VkBuffer instanceBuffer = VK_NULL_HANDLE;
-    uint32_t instanceCount = static_cast<uint32_t>(modelMatrixScratch_.size());
+    uint32_t instanceCount = static_cast<uint32_t>(instanceScratch_.size());
     if (instanceCount != 0) {
         const VkDeviceSize instanceDataSize =
-            static_cast<VkDeviceSize>(modelMatrixScratch_.size() * sizeof(glm::mat4));
+            static_cast<VkDeviceSize>(instanceScratch_.size() * sizeof(InstanceData));
         Buffer& buffer = instanceBuffers_[currentFrame_];
         if (buffer.capacity() < instanceDataSize) {
-            buffer.init(device_, physicalDevice_, modelMatrixScratch_.data(), instanceDataSize,
+            buffer.init(device_, physicalDevice_, instanceScratch_.data(), instanceDataSize,
                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         } else {
-            buffer.update(modelMatrixScratch_.data(), instanceDataSize);
+            buffer.update(instanceScratch_.data(), instanceDataSize);
         }
         instanceBuffer = buffer.handle();
     }
@@ -368,10 +377,16 @@ void VulkanBase::drawFrame(const glm::mat4& viewProjection,
     // нужны мировые (проекция на слой облаков).
     frameData.worldOrigin = glm::vec4{environment.worldOrigin, 0.0f};
     uniformBuffer_.update(currentFrame_, frameData);
+    // HUD обновляем здесь же: UBO кадра в полёте уже наш, и scissor должен быть
+    // посчитан до record(), который его записывает.
+    if (hudVisible_ && hudPass_.ready()) {
+        hudPass_.update(currentFrame_, swapChainExtent_.width, swapChainExtent_.height, hudText_,
+                        hudGlyphScale_);
+    }
     commandBuffers_.record(commandBuffer, renderPass_, imageIndex, swapChainExtent_,
                            pipeline_, meshDraws, kClearColor,
                            uniformBuffer_.descriptorSet(currentFrame_), instanceBuffer,
-                           /*fullscreen=*/false, &skyPipeline_);
+                           /*fullscreen=*/false, &skyPipeline_, hudOverlay());
     // Статистика для HUD: фактическое число draw-вызовов кадра (уже после
     // frustum culling на стороне вызывающего — см. CullingStats).
     lastDrawCalls_ = pipeline_.lastDrawCalls();
@@ -459,6 +474,11 @@ void VulkanBase::createWorldMap(const void* pixels, uint32_t width, uint32_t hei
     worldMapPass_.setTexture(&worldMapTexture_);
     core::Logger::info("Vulkan: текстура карты мира загружена (" +
                        std::to_string(width) + "x" + std::to_string(height) + ")");
+}
+
+void VulkanBase::setHudText(std::string_view text, float glyphScale) {
+    hudText_ = std::string(text);
+    hudGlyphScale_ = glyphScale;
 }
 
 void VulkanBase::drawWorldMap(const MapUniformObject& uniform) {

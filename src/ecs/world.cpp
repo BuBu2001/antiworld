@@ -20,8 +20,9 @@ void World::setEnvironment(const renderer::FrameEnvironment& environment) {
     environment_ = environment;
 }
 
-void World::render(std::span<const renderer::DrawData> extraDraws) {
-    renderSystem_.collect(registry_, renderData_);
+void World::render(const renderer::Frustum& frustum,
+                   std::span<const renderer::DrawData> extraDraws) {
+    renderSystem_.collect(registry_, frustum, renderData_, &chunkCull_);
     // Инстансные объекты (деревья и т.п.) идут в том же списке: drawFrame()
     // сгруппирует DrawData по mesh и сделает один вызов на mesh с
     // instanceCount = N, поэтому тысячи деревьев стоят ровно один draw call.

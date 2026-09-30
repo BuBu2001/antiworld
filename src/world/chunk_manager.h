@@ -131,6 +131,14 @@ struct LoadedChunk {
     physics::PhysicsWorld::BodyHandle body{};             // JPH::BodyID (invalid)
     renderer::Mesh* mesh{nullptr};                        // владеет renderer
 
+    // Габариты вершин ОТНОСИТЕЛЬНО ЦЕНТРА ЧАНКА (double, не сдвигаются при
+    // смене floating origin). Нужны, чтобы пересобирать ecs::Bounds при
+    // сдвиге origin: сам AABB абсолютный (localCenter + эти границы), а
+    // localCenter при сдвиге меняется на delta. Без этого поля чанки
+    // «уезжали» бы из пирамиды видимости и пропадали бы на кадр сдвига.
+    awdm::dvec3 localMin{0.0, 0.0, 0.0};
+    awdm::dvec3 localMax{0.0, 0.0, 0.0};
+
     std::unique_ptr<ChunkData> data;                      // heightmap и пр.
 };
 

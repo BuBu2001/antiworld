@@ -9,6 +9,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <type_traits>
 
 #include <glm/glm.hpp>
@@ -29,6 +30,7 @@
 #include "world/world_map.h"
 #include "world/climate.h"
 #include "world/climatology.h"
+#include "world/vegetation_scatter.h"
 
 #ifndef ANTIWORLD_ASSETS_DIR
 #define ANTIWORLD_ASSETS_DIR "assets"
@@ -51,6 +53,53 @@ float chunkHeightAt(double globalX, double globalZ, void* userData) {
 static_assert(
     std::is_same_v<decltype(&chunkHeightAt), renderer::InstancedRenderer::HeightSampler>,
     "chunkHeightAt должен совпадать с InstancedRenderer::HeightSampler");
+
+// Сэмплер климата и рельефа для world::VegetationScatter.
+//
+// Контекст собран в структуру, а не в лямбду с захватом: SiteSampler — это
+// указатель на функцию с void*, и тип лямбды с захватом в него не
+// преобразуется. Кроме того, все потребуемые рассеву источники (чанки, климат)
+// лежат рядом по времени жизни, и одна структура делает зависимости
+// явными: перестановка строк в main не должна ломать сэмплер.
+struct SiteContext {
+    world::ChunkManager* chunks{nullptr};
+    const world::Climate* climate{nullptr};
+};
+
+world::SiteSample sampleSite(double globalX, double globalZ, void* userData) {
+    auto* context = static_cast<SiteContext*>(userData);
+    world::SiteSample site;
+    const float height = context->chunks->heightAtGlobal(globalX, globalZ);
+    // NaN = чанк не загружен. Возвращаем NaN и дальше (site.valid()), а не 0:
+    // нулевая высота означала бы «суша у моря», и рассев посадил бы лес в
+    // пустоте над провалившимся чанком.
+    if (!std::isfinite(height)) {
+        site.height = std::numeric_limits<float>::quiet_NaN();
+        return site;
+    }
+    site.height = height;
+
+    // Климат спрашиваем в МИРОВЫХ координатах, а не локальных: температура
+    // зависит от широты материка, и сдвиг floating origin не должен двигать
+    // климатические пояса вместе с игроком.
+    const float x = static_cast<float>(globalX);
+    const float z = static_cast<float>(globalZ);
+    const world::Climate& climate = *context->climate;
+    site.temperature = climate.temperatureAt(x, z);
+    site.precipitation = climate.precipitationAt(x, z);
+    site.humidity = climate.humidityAt(x, z);
+    site.continentality = climate.continentalityAt(x, z);
+    site.ice = std::max(climate.permanentIceAt(x, z), climate.seaIceAt(x, z));
+    // Сухость ПОЧВЫ, а не воздуха: это отдельное свойство, и в модели мира её
+    // ближе всего описывает материковость (в глубине континента осадков
+    // меньше) на пару с годовой влажностью. Берём максимум, чтобы и сухой
+    // воздух, и сухая почва вели к кустарнику, а не к лесу.
+    site.dryness = std::clamp(1.0f - site.humidity, 0.0f, 1.0f) * 0.5f +
+                   std::clamp(site.continentality, 0.0f, 1.0f) * 0.5f;
+    // Уровень моря — ПОЛЕ, поэтому сравниваем с локальным, а не средним.
+    site.aboveSea = height - climate.seaLevelAt(x, z);
+    return site;
+}
 
 // Один знак после запятой. std::to_string для double печатает шесть знаков и
 // научную нотацию, а в сводке мира это нечитаемо.
@@ -329,7 +378,67 @@ int main() {
         // по фазе, и ветер в траве шёл бы вразнобой с движением облаков.
         float worldTimeSeconds = 0.0f;
         float telemetryTimer_ = 0.0f;
-        bool treesSpawned = false;
+        // Сглаженный FPS для счётчика в углу. По одиночному dt цифры дёргались
+        // бы на 89..102 и читались бы как помехи, а не как измерение.
+        float hudFps_ = 0.0f;
+
+        // --- Климатозависимая растительность вокруг игрока ---
+        //
+        // Рассев перестраивается, когда игрок ушёл достаточно далеко от
+        // последней ПЕРЕБЫТОЙ точки, а не каждый кадр. Ключевой момент —
+        // якорь С ПЕРЕБИТОМ (voxel'ный сдвиг): точки рассева привязаны к сетке
+        // мировых координат, поэтому участок, попавший в оба рассева, даёт
+        // одни и те же растения. Без якоря соседние участки стыковались бы
+        // разными деревьями, и лес «пересаживался» бы у игрока на глазах.
+        world::VegetationScatter scatter;
+        SiteContext siteContext{&chunks, &climate};
+        // Шаг якоря: заметно меньше радиуса рассева, чтобы участки
+        // перекрывались, и заметно больше размера чанка, чтобы перестроение
+        // случалось не каждый чанк.
+        constexpr double kScatterCellMeters = 2.0;
+        constexpr double kScatterRadiusMeters = 260.0;
+        // Столкновения соседних якорей не дают центру «прыгать» на полсетки и
+        // перестраивать лес чаще, чем нужно.
+        constexpr double kRescatterStepMeters = 48.0;
+        awdm::dvec3 scatterAnchor{0.0, 0.0, 0.0};
+        // Индексы ячейки якоря, а не метры. Сравнение с kRescatterStepMeters
+        // по расстоянию было самосрабатывающим: якорь округляется к сетке
+        // 48 м, поэтому сразу после перестроения игрок может оказаться в углу
+        // своей ячейки, то есть в 48*sqrt(2) ≈ 68 м от якоря. Это больше
+        // kRescatterStepMeters, значит условие «перестроить» было истинно уже
+        // на следующем кадре: рассев пересобирался сотни раз вместо одного,
+        // и каждый раз кадр стоял ~39 мс. Сравнение индексов ячеек убирает
+        // это ровно и без гистерезиса.
+        long long scatterCellX = 0;
+        long long scatterCellZ = 0;
+        bool scatterDone = false;
+        double vegetationScatterMs = 0.0;
+
+        // --- Коллизии стволов ---
+        //
+        // Тела создаются ТОЛЬКО рядом с игроком, а не для всех деревьев в
+        // рассеве. Причина конкретная: физический мир создан с лимитом тел
+        // (maxBodies), и он общий с рельефом. Полтысячи-десятки тысяч стволов
+        // его бы вычерпали, а игрок всё равно не чувствует столкновение дальше
+        // нескольких метров. Радиус заведомо больше дальности обзора — как
+        // только игрок отойдёт, дерево попадёт в следующую пересборку.
+        constexpr double kTreeColliderRadiusMeters = 64.0;
+        std::vector<physics::PhysicsWorld::BodyHandle> treeBodies;
+
+        // Ограничение кадра. Без него видеокарта НИКОГДА не простаивает: в
+        // режиме MAILBOX синхронизации с монитором нет, и рендер упирается
+        // только в скорость, которую тянет GPU, — то есть 100–150 fps и
+        // постоянная 100% загрузка. Именно это греет карту, а не сложность
+        // сцены: замер показал, что при ОТКЛЮЧЕННОЙ растительности карта
+        // грелась даже сильнее (81–83 °C против 80–81), потому что кадров
+        // в секунду становилось больше.
+        //
+        // Ставим 90: выше монитор не показывает, поэтому лишние кадры не
+        // видны, но полностью оплачиваются нагревом. Ограничение НЕ на
+        // glfwSwapInterval, потому что Mailbox вертикальную синхронизацию
+        // отключает, а здесь нужен именно предсказуемый предел нагрузки.
+        constexpr double kFrameBudgetSeconds = 1.0 / 90.0;
+        std::chrono::steady_clock::time_point nextFrameAt = std::chrono::steady_clock::now();
 
         // Главный цикл рендера: обрабатываем события, рисуем кадр, повторяем.
         while (!window.shouldClose()) {
@@ -370,6 +479,13 @@ int main() {
             const double now = glfwGetTime();
             const float dt = static_cast<float>(now - lastTime);
             lastTime = now;
+            // Сглаживание экспоненциальное: реагирует на просадку за ~10 кадров
+            // и не мигает на единичном длинном кадре.
+            if (dt > 0.0f) {
+                const float instant = 1.0f / dt;
+                hudFps_ = (hudFps_ <= 0.0f) ? instant : hudFps_ + (instant - hudFps_) * 0.1f;
+            }
+
             const int width = window.framebufferWidth();
             const int height = window.framebufferHeight();
             const float aspect = (height != 0)
@@ -563,6 +679,80 @@ int main() {
             env.worldOrigin = glm::vec3(chunks.origin());
             world.setEnvironment(env);
 
+            // Растительность живёт не «один раз на запуск», а вокруг игрока:
+            // перестраиваем её, когда игрок отошёл от якоря дальше, чем на
+            // kRescatterStepMeters. Ждём 9 загруженных чанков, иначе
+            // heightAtGlobal вернёт NaN и лес окажется в воздухе/под водой.
+            const awdm::dvec3 playerGlobal = camera.globalPosition();
+            // Индекс ячейки сетки перестроения, в которой стоит игрок.
+            // Смена ячейки — единственный повод перестраивать рассев.
+            const long long playerCellX =
+                static_cast<long long>(std::floor(playerGlobal.x / kRescatterStepMeters));
+            const long long playerCellZ =
+                static_cast<long long>(std::floor(playerGlobal.z / kRescatterStepMeters));
+            const bool needsRescatter =
+                !scatterDone || playerCellX != scatterCellX || playerCellZ != scatterCellZ;
+            if (needsRescatter && chunks.loadedChunkCount() >= 9) {
+                const auto tScatter0 = std::chrono::steady_clock::now();
+                // Якорь С ПЕРЕБИТОМ: округление вниз до сетки кратно
+                // kRescatterStepMeters. Тогда и игрок, и якорь лежат на одной
+                // сетке, и перестроение не сдвигает участок — растения на
+                // стыке двух рассевов совпадают.
+                scatterCellX = playerCellX;
+                scatterCellZ = playerCellZ;
+                scatterAnchor.x = static_cast<double>(scatterCellX) * kRescatterStepMeters;
+                scatterAnchor.z = static_cast<double>(scatterCellZ) * kRescatterStepMeters;
+                // Полная пересборка пула: проще и надёжнее, чем удалять
+                // объекты по индексам. Радиус 260 м и шаг 48 м означают, что
+                // участки сильно перекрываются, поэтому на стыке лес не
+                // «худеет», а ставится заново тем же самым.
+                instanced.clearObjects();
+                world::VegetationScatter::ScatterRequest request;
+                request.centerGlobal = scatterAnchor;
+                request.radiusMeters = kScatterRadiusMeters;
+                request.cellSizeMeters = kScatterCellMeters;
+                const std::size_t placed = scatter.scatter(request, &sampleSite, &siteContext,
+                                                            vulkan, instanced);
+                vegetationScatterMs = std::chrono::duration<double, std::milli>(
+                                          std::chrono::steady_clock::now() - tScatter0)
+                                          .count();
+                scatterDone = true;
+                core::Logger::info("Растительность: " + std::to_string(placed) +
+                                   " объектов вокруг якоря, коллизий стволов " +
+                                   std::to_string(treeBodies.size()) + ", " +
+                                   formatOne(vegetationScatterMs) + " мс");
+
+                // Старые стволы удаляем ДО создания новых: иначе тела
+                // накапливались бы с каждой пересборкой, и лимит физического
+                // мира исчерпался бы через несколько десятков метров пути.
+                for (const physics::PhysicsWorld::BodyHandle handle : treeBodies) {
+                    if (physicsWorld.isBodyValid(handle)) physicsWorld.removeBody(handle);
+                }
+                treeBodies.clear();
+                // Коллизия строится в МИРОВЫХ координатах, как и тела рельефа:
+                // Jolt-мир не знает про floating origin, сдвиг делает матрица
+                // камеры. Поэтому baseGlobal уходит в физику без вычитания
+                // chunks.origin() — иначе стволы оказались бы на километры
+                // в стороне от своих деревьев.
+                for (const world::VegetationScatter::TreeCollider& trunk :
+                     scatter.treeColliders()) {
+                    const double dx = trunk.baseGlobal.x - playerGlobal.x;
+                    const double dz = trunk.baseGlobal.z - playerGlobal.z;
+                    if (dx * dx + dz * dz >
+                        kTreeColliderRadiusMeters * kTreeColliderRadiusMeters) {
+                        continue;
+                    }
+                    // Центр цилиндра — середина ствола, а не его основание:
+                    // тело создаётся относительно центра формы.
+                    const float halfHeight = trunk.height * 0.5f;
+                    treeBodies.push_back(physicsWorld.createStaticCylinder(
+                        trunk.radius, halfHeight,
+                        glm::vec3(static_cast<float>(trunk.baseGlobal.x),
+                                  static_cast<float>(trunk.baseGlobal.y) + halfHeight,
+                                  static_cast<float>(trunk.baseGlobal.z))));
+                }
+            }
+
             // --- Инстансная растительность: culling + сбор DrawData ---
             //
             // Frustum строится в ЛОКАЛЬНЫХ координатах (те же, что у view-
@@ -623,24 +813,17 @@ int main() {
                 }
                 vulkan.drawWorldMap(mapUniform);
             } else {
-                world.render(std::span<const renderer::DrawData>(instancedDraws.data(),
-                                                                 instancedDraws.size()));
+                // Счётчик FPS в левом верхнем углу. На карте мира он не нужен,
+                // поэтому текст задаётся только перед сценой.
+                vulkan.setHudText("FPS " + std::to_string(static_cast<int>(std::lround(hudFps_))));
+                // Тот же frustum, что и для растительности выше: он уже
+                // построен в локальном фрейме кадра, а чанки лежат в нём же.
+                world.render(frustum, std::span<const renderer::DrawData>(instancedDraws.data(),
+                                                                          instancedDraws.size()));
             }
             const double frameCpuMs = std::chrono::duration<double, std::milli>(
                                           std::chrono::steady_clock::now() - frameStart)
                                           .count();
-            // Деревья расставляем один раз, когда вокруг игрока уже есть
-            // загруженные чанки с рельефом: иначе heightAtGlobal вернёт NaN и
-            // деревья окажутся в воздухе/под водой.
-            if (!treesSpawned && chunks.loadedChunkCount() >= 9) {
-                treesSpawned = true;
-                const std::size_t placed = instanced.spawnTrees(
-                    vulkan, 20000, camera.globalPosition(), 3000.0, &chunkHeightAt, &chunks,
-                    2.0f, 20240517u);
-                core::Logger::info("Растительность: " + std::to_string(placed) +
-                                   " деревьев (instancing, 1 draw call на mesh)");
-            }
-
             // Проверка физики: агенты должны стоять на рельефе, то есть
             // y = высота меша + полуразмер тела. Считаем отклонение, а не
             // абсолютную Y: так видно и «висит в воздухе», и «провалился».
@@ -730,18 +913,37 @@ int main() {
                         " фокус=" + (focused ? "ДА" : "НЕТ") +
                         " | деревья: " + std::to_string(treeCull.visible) + "/" +
                         std::to_string(treeCull.total) + " (" +
-                        std::to_string(treeCull.drawCalls) + " instanced draw call) cull=" +
+                        std::to_string(treeCull.drawCalls) + " instanced draw call, scatter " +
+                        formatOne(vegetationScatterMs) + " мс) cull=" +
                         std::to_string(cullMs) + "мс cpuFrame=" + std::to_string(frameCpuMs) +
                         "мс | ИГРОК: " + (playerController.state().grounded ? "на земле" : "в воздухе") +
                         " v=" + std::to_string(playerController.state().horizontalSpeed) +
                         "м/с" + (playerController.state().running ? " бег" : " шаг") +
                         " y-рельеф=" + std::to_string(playerAboveTerrain) + "м" +
-                        " угол(движ,взгляд)=" + std::to_string(playerLookAngleDeg) + "°" +
+                        " угол(движ,взгляд)=" +                         std::to_string(playerLookAngleDeg) + "°" +
+                        " | чанки в кадре: " +
+                        std::to_string(world.chunkCullStats().submitted) + " видимых, " +
+                        std::to_string(world.chunkCullStats().culled) + " отсеяно" +
                         " | агенты на рельефе: отклонение=" +
                         std::to_string(agentRestError) + " м" +
                         " yaw=" + std::to_string(camera.yaw() * 57.2958f) + "°" +
                         " pitch=" + std::to_string(camera.pitch() * 57.2958f) + "°" +
                         " | стриминг: " + chunks.debugLine());
+            }
+
+            // Держим темп не выше бюджета кадра. Спим только остаток: если
+            // кадр сам по себе длиннее бюджета (тяжёлая пересборка рассева,
+            // подгрузка чанков), ничего не ждём — иначе ограничитель
+            // превратился бы в источник рывков.
+            nextFrameAt += std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                std::chrono::duration<double>(kFrameBudgetSeconds));
+            const auto frameDeadline = std::chrono::steady_clock::now();
+            if (nextFrameAt < frameDeadline) {
+                // Кадр не уложился: сдвигаем точку отсчёта, иначе ограничитель
+                // копил бы долг и потом «догонял» его пачкой бесплатных кадров.
+                nextFrameAt = frameDeadline;
+            } else {
+                std::this_thread::sleep_for(nextFrameAt - frameDeadline);
             }
         }
 

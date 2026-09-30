@@ -43,7 +43,15 @@ public:
     // Эти DrawData живут только внутри InstancedRenderer (scratch-буфер), так
     // что копировать их в renderData_ смысла нет — render() лишь снимает
     // указатели на время вызова drawFrame().
-    void render(std::span<const renderer::DrawData> extraDraws = {});
+    void render(const renderer::Frustum& frustum,
+                std::span<const renderer::DrawData> extraDraws = {});
+
+    // Отсечение чанков за последний кадр. submitted — сколько чанков ушло в
+    // GPU, culled — сколько отсеяно пирамидой видимости. Нужно для лога:
+    // без него не видно, работает ли отсечение вообще.
+    const ecs::RenderSystem::CullStats& chunkCullStats() const noexcept {
+        return chunkCull_;
+    }
     // Свет и климат кадра для шейдера. Заполняется из world::Climate каждый
     // кадр (см. world::Terrain::environment) и просто перекладывается в
     // renderer::drawFrame, поэтому renderer не зависит от климата.
@@ -57,6 +65,7 @@ private:
     renderer::VulkanBase& renderer_;
     renderer::FrameEnvironment environment_;
     std::vector<renderer::DrawData> renderData_;
+    RenderSystem::CullStats chunkCull_{};
 };
 
 }

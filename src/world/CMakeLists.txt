@@ -12,6 +12,7 @@ add_library(world STATIC
     spatial_hash.cpp
     chunk_manager.cpp
     thread_pool.cpp
+    vegetation_scatter.cpp
 )
 
 target_include_directories(world PUBLIC ${CMAKE_CURRENT_LIST_DIR}/..)

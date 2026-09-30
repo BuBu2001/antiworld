@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "core/logger.h"
+#include "renderer/mesh.h"
 #include "renderer/shader.h"
 #include "renderer/vertex.h"
 
@@ -51,6 +52,10 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
             vertName = "sky.vert.spv";
             fragName = "sky.frag.spv";
             break;
+        case PipelineMode::Hud:
+            vertName = "hud.vert.spv";
+            fragName = "hud.frag.spv";
+            break;
     }
     Shader vertexShader(device_, shaderPath(vertName));
     Shader fragmentShader(device_, shaderPath(fragName));
@@ -78,14 +83,16 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     bindingDescriptions[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
     bindingDescriptions[1].binding = 1;
-    bindingDescriptions[1].stride = sizeof(glm::mat4);
+    bindingDescriptions[1].stride = kInstanceStride;
     bindingDescriptions[1].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
     // Атрибуты: 0..6 — вершина (binding 0), 7..10 — колонки матрицы модели
     // (binding 1, instanced). Нумерация атрибутов сквозная по обоим bindings,
     // поэтому добавление цвета к Vertex сдвинуло матрицу с 3..6 на 5..8, а
     // последующие флаги воды и локального уровня моря — на 7..10.
-    std::array<VkVertexInputAttributeDescription, 11> attributeDescriptions{};
+    // 0..6 — вершина (binding 0), 7..10 — колонки матрицы модели, 11 — tint
+    // инстанса (binding 1, instanced).
+    std::array<VkVertexInputAttributeDescription, 12> attributeDescriptions{};
     attributeDescriptions[0].location = 0;
     attributeDescriptions[0].binding = 0;
     attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
@@ -131,8 +138,15 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
         attributeDescriptions[column + 7].binding = 1;
         attributeDescriptions[column + 7].format = VK_FORMAT_R32G32B32A32_SFLOAT;
         attributeDescriptions[column + 7].offset =
-            static_cast<uint32_t>(column * sizeof(glm::vec4));
+            static_cast<uint32_t>(offsetof(InstanceData, model) + column * sizeof(glm::vec4));
     }
+
+    // Tint инстанса. offsetof, а не «sizeof(glm::mat4)»: если в InstanceData
+    // появится ещё поле, атрибут останется на своём месте сам.
+    attributeDescriptions[11].location = 11;
+    attributeDescriptions[11].binding = 1;
+    attributeDescriptions[11].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    attributeDescriptions[11].offset = static_cast<uint32_t>(offsetof(InstanceData, tint));
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
     vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -181,7 +195,7 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     //  * Sky — depth ТЕСТИРУЕТСЯ, но не пишется, и сравнение EQUAL против
     //    очистки 1.0. Небо пропускает ровно те пиксели, где сцена глубину
     //    не записала, и не тратит шейдер на землю.
-    if (mode == PipelineMode::Fullscreen) {
+    if (mode == PipelineMode::Fullscreen || mode == PipelineMode::Hud) {
         depthStencil.depthTestEnable = VK_FALSE;
         depthStencil.depthWriteEnable = VK_FALSE;
         depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
@@ -197,12 +211,23 @@ void GraphicsPipeline::init(VkDevice device, VkRenderPass renderPass,
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable = VK_FALSE;
 
-    // Блендинг отключён: цвет фрагмента пишется напрямую в аттачмент.
+    // Блендинг включён ТОЛЬКО для HUD: текст ложится поверх готового кадра.
+    // У остальных режимов цвет пишется напрямую в аттачмент.
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.colorWriteMask =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-    colorBlendAttachment.blendEnable = VK_FALSE;
+    colorBlendAttachment.blendEnable = mode == PipelineMode::Hud ? VK_TRUE : VK_FALSE;
+    if (colorBlendAttachment.blendEnable) {
+        // Стандартное src-alpha поверх dst: непрозрачные пиксели панели
+        // закрывают сцену, а discard в шейдере оставляет её нетронутой.
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
 
     VkPipelineColorBlendStateCreateInfo colorBlending{};
     colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;

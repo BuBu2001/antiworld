@@ -58,7 +58,8 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
                             GraphicsPipeline& pipeline,
                             std::span<const MeshDraw> meshDraws, VkClearColorValue clearColor,
                             VkDescriptorSet descriptorSet, VkBuffer instanceBuffer,
-                            bool fullscreen, GraphicsPipeline* skyPipeline) {
+                            bool fullscreen, GraphicsPipeline* skyPipeline,
+                            const SceneOverlay& overlay) {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -126,10 +127,18 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
 
         const std::array<VkBuffer, 2> vertexBufferHandles = {draw.mesh->vertexBuffer(),
                                                              instanceBuffer};
-        // Смещение(instance-матрицы) кратно sizeof(glm::mat4) — это же длина
-        // экземпляра в пайплайне, поэтому вершины читаются с правильного места.
+        // Смещение инстанса ОБЯЗАТНО кратно kInstanceStride — это же длина
+        // экземпляра в пайплайне (см. Pipeline::vertexInput).
+        //
+        // Здесь важно брать именованную структуру, а не glm::mat4: когда в
+        // инстанс добавили tint, запись перестала быть матрицей, но это
+        // выражение осталось sizeof(glm::mat4) = 64 байта при реальном шаге
+        // 80. Ошибка молчаливая: первая группа читалась верно, а каждая
+        // следующая — с середины чужой записи, то есть матрица и tint
+        // приезжали из байт соседнего растения. На экране это «куча
+        // артефактов», а в логе — ни одного предупреждения.
         const std::array<VkDeviceSize, 2> offsets = {
-            0, static_cast<VkDeviceSize>(draw.firstInstance) * sizeof(glm::mat4)};
+            0, static_cast<VkDeviceSize>(draw.firstInstance) * kInstanceStride};
         vkCmdBindVertexBuffers(commandBuffer, 0,
                                static_cast<uint32_t>(vertexBufferHandles.size()),
                                vertexBufferHandles.data(), offsets.data());
@@ -163,6 +172,35 @@ void CommandBuffers::record(VkCommandBuffer commandBuffer, const RenderPass& ren
         // пайплайна, и перепривязывать его не нужно.
         vkCmdDraw(commandBuffer, 3, 1, 0, 0);
         skyPipeline->countDrawCall();
+    }
+
+    // Оверлей (HUD): последним, поверх сцены и неба. Свой набор дескрипторов
+    // и viewport+scissor по его прямоугольнику: текст — это сотня пикселей,
+    // а полноэкранный треугольник без scissor прогнал бы шейдер по двум
+    // миллионам.
+    if (overlay.pipeline != nullptr) {
+        VkViewport overlayViewport{};
+        overlayViewport.x = 0.0f;
+        overlayViewport.y = 0.0f;
+        // Ставим viewport по swapchain, а не по прямоугольнику оверлея: иначе
+        // gl_FragCoord вышел бы за пределы viewport и шейкер считал бы, что
+        // весь экран — это HUD.
+        overlayViewport.width = static_cast<float>(extent.width);
+        overlayViewport.height = static_cast<float>(extent.height);
+        overlayViewport.minDepth = 0.0f;
+        overlayViewport.maxDepth = 1.0f;
+        vkCmdSetViewport(commandBuffer, 0, 1, &overlayViewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &overlay.scissor);
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          overlay.pipeline->handle());
+        if (overlay.descriptorSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    overlay.pipeline->layout(), 0, 1, &overlay.descriptorSet, 0,
+                                    nullptr);
+        }
+        vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+        overlay.pipeline->countDrawCall();
     }
 
     vkCmdEndRenderPass(commandBuffer);

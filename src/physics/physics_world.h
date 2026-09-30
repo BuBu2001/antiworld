@@ -38,6 +38,15 @@ public:
         float halfExtent = 30.0f
     );
 
+    // Статический цилиндр — коллизия ствола дерева. halfHeight — половина
+    // ВЫСОТЫ цилиндра (как у капсулы), то есть полная высота = 2*halfHeight.
+    BodyHandle createStaticCylinder(
+        float radius,
+        float halfHeight,
+        const glm::vec3& position,
+        const glm::quat& rotation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f)
+    );
+
     BodyHandle createDynamicBox(
         const glm::vec3& halfExtents,
         const glm::vec3& position,

@@ -59,12 +59,25 @@ struct InstancedObject {
     float yawRadians{0.0f};
     float scale{1.0f};
     std::uint16_t primitive{0};
-    float radius{1.0f};   // bounding radius юнита (до масштаба)
-    glm::vec3 colorTint{1.0f};  // альбедо-множитель (в будущем — через атрибут)
+    // Габаритный радиус юнита. НЕ заданная константа вида, а извлечённый из
+    // реальной геометрии в addPrimitive(): у каждого вида своя высота и
+    // размах, и сфера, посчитанная «на глаз», либо обрезает крону (дерево
+    // исчезает из кадара у самой камеры), либо стоит втрое дороже нужного.
+    float radius{1.0f};
+    // Альбедо-множитель экземпляра. У растительности он несут СМЫСЛ: деревья
+    // одного вида на севере и на юге отличаются цветом (хвоя темнее, листва
+    // желтее в засухе), и без множителя весь мир был бы одного оттенка.
+    glm::vec3 colorTint{1.0f};
 };
 
 class InstancedRenderer {
 public:
+    // Примитив, которого нет. Рассев проверяет индекс на это значение перед
+    // использованием: молчаливый выход за пределы массива дал бы «растение» из
+    // чужого mesh'а, и ошибка проявилась бы через тысячу кадров как «иногда
+    // не то дерево», а не как падение.
+    static constexpr std::uint16_t kInvalidPrimitive = 0xFFFFu;
+
     InstancedRenderer() = default;
 
     // Копирование запрещено: указатели mesh принадлежат VulkanBase, а пул
@@ -84,11 +97,35 @@ public:
     // Расставляет деревья по сетке с джиттером над ландшафтом: высота берётся
     // из heightSampler (глобальные XZ -> Y), ниже seaLevel+minAboveSea —
     // пропуск (на воде деревьев не бывает). Детерминированный seed.
+    //
+    // ОСТОРОЖНО: это тестовый рассев, он НЕ смотрит на климат и ставит один
+    // вид на всей площади. Боевая растительность — world::VegetationScatter,
+    // он выбирает вид по температуре/осадкам и умеет пересобираться при
+    // движении игрока. Этот остаётся только как простой пример вызова.
     using HeightSampler = float (*)(double globalX, double globalZ, void* userData);
     std::size_t spawnTrees(VulkanBase& renderer, std::size_t count,
                            const awdm::dvec3& areaCenterGlobal, double areaSizeMeters,
                            HeightSampler heightSampler, void* samplerUserData,
                            double minAboveSea, std::uint32_t seed);
+
+    // === Пул объектов (используется VegetationScatter) ===
+
+    // Добавить готовый объект в пул. Пул — плоский vector, поэтому добавление
+    // амортизировано, а вставлять можно только в конец.
+    void addObject(const InstancedObject& object) { addObjectNoReserve(object); }
+
+    // Полностью очистить пул объектов, ОСТАВИВ примитивы (mesh'и): смена
+    // рассева вокруг игрока не должна перезагружать геометрию на GPU, иначе
+    // каждый шаг по миру стоил бы десятки миллисекунд на загрузку mesh'ей.
+    //
+    // «Удаление» объекта внутри пула — swap-remove (см. removeSwap),
+    // произвольный порядок после которого не имеет значения: объекты
+    // сортируются по примитиву заново в collectDraws().
+    void clearObjects();
+
+    // Габаритный радиус примитива в юнитах. Нужен рассеву, чтобы проставить
+    // object.radius при создании инстанса.
+    float primitiveRadius(std::uint16_t primitive) const noexcept;
 
     std::size_t objectCount() const noexcept { return objects_.size(); }
     const std::vector<InstancedObject>& objects() const noexcept { return objects_; }
@@ -122,12 +159,26 @@ private:
     struct Primitive {
         Mesh* mesh{nullptr};  // не владеет: mesh принадлежит VulkanBase
         std::uint32_t triangles{0};
+        // Габариты ЮНИТА, извлечённые из геометрии при загрузке. Основание
+        // вида — Y=0 (то есть в точке земли), а тело растёт вверх, поэтому
+        // bounding center по Y НЕ равен нулю: у 12-метровой ели он около
+        // 5.5 м. Раньше AABB строился сферой вокруг самой позиции, то есть
+        // вокруг земли, и верхушка кроны выпадала из кадра у самой камеры.
+        glm::vec3 boundCenter{0.0f};
+        float boundRadius{1.0f};
     };
 
     void ensureSorted() const;
+    // Добавление без reserve: рассев зовёт это тысячи раз подряд, и reserve
+    // на каждый вызов стоил бы дороже самой вставки.
+    void addObjectNoReserve(const InstancedObject& object);
 
     std::vector<Primitive> primitives_;
     std::vector<InstancedObject> objects_;
+    // Сколько объектов пула зарезервировано: addObject() при пустом пуле
+    // резервирует порциями, иначе первый же рассев на 100 000 объектов
+    // делал бы 17 перевыделений с копированием.
+    std::size_t objectCapacityHint_{0};
     // Буфер-накопитель выхода collectDraws (mutable-семантики избегаем:
     // collectDraws пишет в out вызывающего; этот scratch нужен только для
     // сортировки по примитиву, чтобы drawFrame() слил инстансы в один вызов).

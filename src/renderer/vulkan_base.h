@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <stdexcept>
 #include <vector>
 #include <glm/glm.hpp>
@@ -21,6 +23,7 @@
 #include "renderer/pipeline.h"
 #include "renderer/render_pass.h"
 #include "renderer/uniform_buffer.h"
+#include "renderer/hud_pass.h"
 #include "renderer/world_map_pass.h"
 
 namespace core {
@@ -102,6 +105,15 @@ public:
     void drawWorldMap(const MapUniformObject& uniform);
     // Готова ли карта к отрисовке (текстура загружена, проход создан).
     bool worldMapReady() const noexcept { return worldMapPass_.ready(); }
+
+    // === HUD ===
+    // Строка в левом верхнем углу (сейчас — "FPS 90"). Вызывается раз в кадр
+    // до drawFrame(); попадает в UBO кадра в полёте, поэтому на других кадрах
+    // не мешает. glyphScale — размер глифа в экранных пикселях: 3 даёт
+    // читаемые цифры 15x21 px на 1080p.
+    void setHudText(std::string_view text, float glyphScale = 3.0f);
+    // Выключает HUD (например, для кадров карты мира, где счётчик не нужен).
+    void setHudVisible(bool visible) noexcept { hudVisible_ = visible; }
 
     // Освобождает все Vulkan-ресурсы в правильном порядке.
     void cleanup();
@@ -194,6 +206,25 @@ private:
     // проход (пайплайн зависит от render pass, поэтому пересоздаётся вместе с ним).
     Texture worldMapTexture_;
     WorldMapPass worldMapPass_;
+    // HUD-счётчик FPS: свой пайплайн, свой атлас шрифта и свой набор
+    // дескрипторов, потому что рисуется последним и со смешиванием.
+    HudPass hudPass_;
+    std::string hudText_{"FPS --"};
+    float hudGlyphScale_ = 3.0f;
+    bool hudVisible_ = true;
+
+    // Оверлей для CommandBuffers::record(). Пустой, если HUD выключен или
+    // проход ещё не готов — тогда лишнего draw-вызова не будет вовсе.
+    SceneOverlay hudOverlay() {
+        SceneOverlay overlay;
+        if (!hudVisible_ || !hudPass_.ready()) {
+            return overlay;
+        }
+        overlay.pipeline = &hudPass_.pipeline();
+        overlay.descriptorSet = hudPass_.descriptorSet(currentFrame_);
+        overlay.scissor = hudPass_.scissor();
+        return overlay;
+    }
     Mesh mesh_;
     // Прочие mesh (террейн и т.п.), созданные через createMesh.
     std::vector<std::unique_ptr<Mesh>> ownedMeshes_;
@@ -206,9 +237,12 @@ private:
     // переставлять элементы у вызывающего за спиной не вежливо. Буфер
     // переиспользуется между кадрами, чтобы не аллоцировать в горячем пути.
     std::vector<DrawData> sortScratch_;
-    // Рабочие буферы групп (mesh, LOD) и матриц — тоже переиспользуются.
+    // Рабочие буферы групп (mesh, LOD) и записей instance-буфера — тоже
+    // переиспользуются. Хранится именно InstanceData (матрица + tint), а не
+    // матрица: иначе tint пришлось бы держать во втором буфере, и пришлось бы
+    // синхронизировать два буфера по одному и тому же индексу инстанса.
     std::vector<MeshDraw> meshDrawScratch_;
-    std::vector<glm::mat4> modelMatrixScratch_;
+    std::vector<InstanceData> instanceScratch_;
 
     // Draw-вызовы последнего записанного командного буфера (статистика HUD).
     std::uint32_t lastDrawCalls_{0};
